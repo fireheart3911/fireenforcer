@@ -16,6 +16,9 @@ from config import (
 from cogs.tickets import TicketView, CloseView, setup as setup_tickets
 from cogs.status import StatusView, setup_status_message, setup as setup_status
 from cogs.elo import EloSessionView, setup as setup_elo
+from cogs.council import (
+    CommentView, VoteView, VetoView, QuashView, setup as setup_council,
+)
 
 # ---------------------------------------------------------------------------
 # Bot client
@@ -24,6 +27,7 @@ from cogs.elo import EloSessionView, setup as setup_elo
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
+intents.members = True  # needed for complete role.members / eligible-voter counts
 
 
 class BotClient(commands.Bot):
@@ -33,6 +37,10 @@ class BotClient(commands.Bot):
         self.add_view(TicketView())
         self.add_view(CloseView())
         self.add_view(StatusView())
+        self.add_view(CommentView())
+        self.add_view(VoteView())
+        self.add_view(VetoView())
+        self.add_view(QuashView())
 
         # Load cogs
         await setup_tickets(self)
@@ -47,6 +55,7 @@ class BotClient(commands.Bot):
             guild_id=GUILD_ID,
             elo_log_channel_id=ELO_LOG_CHANNEL_ID.id,
         )
+        self._council_cog = await setup_council(self)
 
     async def on_ready(self):
         print(f"Logged in as {self.user}")
@@ -62,6 +71,7 @@ class BotClient(commands.Bot):
         # Start task loops
         self._status_cog.cleanup_expired_statuses.start()
         self._elo_cog.cleanup_old_sessions.start()
+        self._council_cog.tick.start()
         self.autoclose_tickets.start()
         if HEARTBEAT_URL:
             self.heartbeat.start()
