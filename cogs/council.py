@@ -189,7 +189,7 @@ def build_vote_embed(guild: discord.Guild, vote: dict) -> discord.Embed:
     # Vote counts according to visibility
     if status in ("voting", "veto") or status in ("passed", "applied", "failed", "blocked", "expired", "vetoed", "quashed"):
         yes, no, abstain = tally(vote)
-        eligible = vote.get("eligible_snapshot") or count_eligible(guild)
+        eligible = vote.get("eligible_snapshot") or _count_eligible_cached(guild)
         vis = vote.get("visibility", "counts")
         if vis == "hidden" and status == "voting":
             voted = len(vote["votes"])
@@ -198,14 +198,14 @@ def build_vote_embed(guild: discord.Guild, vote: dict) -> discord.Embed:
             need = vl.required_yes(vote["mode"], eligible)
             embed.add_field(
                 name="Tally",
-                value=f"✅ Approve: **{yes}**  ·  ❌ Oppose: **{no}**  ·  ➖ Abstain: **{abstain}**\n"
+                value=f"✅ Yes: **{yes}**  ·  ❌ No: **{no}**  ·  🤐 Abstain: **{abstain}**\n"
                       f"Eligible: {eligible} · Needed to pass: {need}",
                 inline=False,
             )
             if vis == "full":
                 lines = []
                 for uid, choice in vote["votes"].items():
-                    icon = {"yes": "✅", "no": "❌", "abstain": "➖"}[choice]
+                    icon = {"yes": "✅", "no": "❌", "abstain": "🤐"}[choice]
                     lines.append(f"{icon} <@{uid}>")
                 if lines:
                     embed.add_field(name="Voters", value="\n".join(lines), inline=False)
@@ -263,6 +263,7 @@ class VoteView(discord.ui.View):
         if not is_council(interaction.user):
             return await interaction.response.send_message("❌ Only council/owners may vote.", ephemeral=True)
 
+        await interaction.response.defer(ephemeral=True)
         vote["votes"][str(interaction.user.id)] = choice
         store.save_data()
         await _refresh_vote_message(interaction.client, vote)
@@ -272,7 +273,7 @@ class VoteView(discord.ui.View):
         if len(vote["votes"]) >= eligible:
             await _close_voting(interaction.client, vote)
 
-        await interaction.response.send_message(f"Recorded your vote: **{choice}**", ephemeral=True)
+        await interaction.followup.send(f"Recorded your vote: **{choice}**", ephemeral=True)
 
     @discord.ui.button(label="Yes", style=discord.ButtonStyle.green, emoji="✅", custom_id="cv:yes")
     async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -288,7 +289,7 @@ class VoteView(discord.ui.View):
 
 
 class VetoView(discord.ui.View):
-    """Single veto button posted in the owner channel for proposals."""
+    """Veto / won't-veto buttons posted in the owner channel for proposals."""
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -301,8 +302,38 @@ class VetoView(discord.ui.View):
             return await interaction.response.send_message("❌ This vote is not in the veto window.", ephemeral=True)
         if not is_owner_member(interaction.user):
             return await interaction.response.send_message("❌ Only owners may veto.", ephemeral=True)
+        # Acknowledge first — _apply_veto does several network calls that would
+        # otherwise blow past the 3s interaction window (error 10062).
+        await interaction.response.defer(ephemeral=True)
         await _apply_veto(interaction.client, vote, interaction.user.id)
-        await interaction.response.send_message("🛑 Proposal vetoed.", ephemeral=True)
+        await interaction.followup.send("🛑 Proposal vetoed.", ephemeral=True)
+
+    @discord.ui.button(label="Won't Veto", style=discord.ButtonStyle.green, emoji="👍", custom_id="cv:noveto")
+    async def no_veto(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vote = _find_vote_by_owner_msg(interaction.message.id)
+        if not vote:
+            return await interaction.response.send_message("❌ No vote bound to this message.", ephemeral=True)
+        if vote["status"] != "veto":
+            return await interaction.response.send_message("❌ This vote is not in the veto window.", ephemeral=True)
+        if not is_owner_member(interaction.user):
+            return await interaction.response.send_message("❌ Only owners may respond.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        await _finalize_proposal(interaction.client, vote)
+
+        # Remove the buttons from the owner-channel message
+        owner_channel = interaction.client.get_channel(config.OWNER_CHANNEL_ID)
+        if owner_channel and vote.get("owner_msg_id"):
+            try:
+                msg = await owner_channel.fetch_message(int(vote["owner_msg_id"]))
+                await msg.edit(view=None)
+            except discord.HTTPException:
+                pass
+
+        await council_log(interaction.client,
+                          f"👍 <@{interaction.user.id}> declined to veto **{vote['title']}** "
+                          f"(`{vote['id']}`) — enacted early.")
+        await interaction.followup.send("👍 Recorded — proposal enacted.", ephemeral=True)
 
 
 class QuashView(discord.ui.View):
@@ -319,8 +350,9 @@ class QuashView(discord.ui.View):
             return await interaction.response.send_message("❌ Only an applied promotion can be quashed.", ephemeral=True)
         if not is_owner_member(interaction.user):
             return await interaction.response.send_message("❌ Only owners may quash.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
         await _quash_promotion(interaction.client, interaction.guild, vote, interaction.user.id)
-        await interaction.response.send_message("🛑 Promotion quashed and reverted.", ephemeral=True)
+        await interaction.followup.send("🛑 Promotion quashed and reverted.", ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
