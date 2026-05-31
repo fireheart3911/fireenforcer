@@ -309,12 +309,8 @@ async def log_status_event(
 
 
 # ---------------------------------------------------------------------------
-# Preferences helper
+# Helpers
 # ---------------------------------------------------------------------------
-
-def get_pref(user_id: str, key: str, default):
-    return store.storage.get("user_prefs", {}).get(user_id, {}).get(key, default)
-
 
 def has_active_vacation(user_id: str) -> bool:
     """True if the user is currently within one of their vacation windows."""
@@ -325,14 +321,16 @@ def has_active_vacation(user_id: str) -> bool:
     return False
 
 
-def set_pref(user_id: str, key: str, value):
-    store.storage.setdefault("user_prefs", {}).setdefault(user_id, {})[key] = value
-    store.save_data()
-
-
 # ---------------------------------------------------------------------------
-# Queue-stop private notification thread
+# Queue-stop role ping
 # ---------------------------------------------------------------------------
+
+def get_ping_role(guild: discord.Guild):
+    """Return the configured queue-stop ping role, or None."""
+    if guild is None or config.QUEUE_STOP_PING_ROLE_ID is None:
+        return None
+    return guild.get_role(config.QUEUE_STOP_PING_ROLE_ID)
+
 
 async def _get_or_create_qs_thread(client: commands.Bot):
     """Return the private queue-stop thread, creating it if needed. May return None."""
@@ -358,7 +356,7 @@ async def _get_or_create_qs_thread(client: commands.Bot):
             name="queue-stop-notifications",
             type=discord.ChannelType.private_thread,
             invitable=False,
-            reason="Queue stop opt-in notifications",
+            reason="Queue stop notifications",
         )
     except discord.HTTPException as e:
         print(f"Failed to create queue-stop thread: {e}")
@@ -372,37 +370,20 @@ async def _get_or_create_qs_thread(client: commands.Bot):
     return thread
 
 
-async def _set_qs_membership(client: commands.Bot, user_id: str, opted_in: bool):
-    """Add/remove a user from the private notification thread to match their opt-in."""
-    thread = await _get_or_create_qs_thread(client)
-    if thread is None:
-        return
-    try:
-        user = await client.fetch_user(int(user_id))
-        if opted_in:
-            await thread.add_user(user)
-        else:
-            await thread.remove_user(user)
-    except discord.HTTPException as e:
-        print(f"Failed to update queue-stop thread membership for {user_id}: {e}")
-
-
 async def _send_queue_stop_ping(client: commands.Bot, creator_id: str, arrive_ts: int):
-    """Ping opted-in users inside the private thread (no public channel clutter)."""
-    prefs = store.storage.get("user_prefs", {})
-    opted_in = [uid for uid, p in prefs.items()
-                if uid != creator_id and p.get("queue_stop_notifications", False)]
-    if not opted_in:
+    """Ping the queue-stop role inside the private notification thread."""
+    if config.QUEUE_STOP_PING_ROLE_ID is None:
         return
 
     thread = await _get_or_create_qs_thread(client)
     if thread is None:
         return
 
-    mentions = " ".join(f"<@{uid}>" for uid in opted_in)
+    role_mention = f"<@&{config.QUEUE_STOP_PING_ROLE_ID}>"
     try:
         await thread.send(
-            f"🛑 {mentions} — <@{creator_id}> called a **queue stop**, here <t:{arrive_ts}:R>!"
+            f"🛑 {role_mention} — <@{creator_id}> called a **queue stop**, here <t:{arrive_ts}:R>!",
+            allowed_mentions=discord.AllowedMentions(roles=True, users=False, everyone=False),
         )
     except discord.HTTPException as e:
         print(f"Failed to send queue-stop ping: {e}")
@@ -682,7 +663,7 @@ class PrefsRow(discord.ui.ActionRow):
     def __init__(self, view: "MoreOptionsView"):
         super().__init__()
         self.owner = view
-        on = get_pref(view.user_id, "queue_stop_notifications", False)
+        on = view.ping_opt_in
         self.toggle_pings.label = f"Queue Stop Pings: {'ON' if on else 'OFF'}"
         self.toggle_pings.emoji = "🔔" if on else "🔕"
         self.toggle_pings.style = discord.ButtonStyle.green if on else discord.ButtonStyle.gray
@@ -690,10 +671,27 @@ class PrefsRow(discord.ui.ActionRow):
     @discord.ui.button(label="Queue Stop Pings: OFF", emoji="🔕", style=discord.ButtonStyle.gray)
     async def toggle_pings(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = self.owner.user_id
-        new_state = not get_pref(uid, "queue_stop_notifications", False)
-        set_pref(uid, "queue_stop_notifications", new_state)
-        await _set_qs_membership(interaction.client, uid, new_state)
-        await interaction.response.edit_message(view=MoreOptionsView(uid, interaction))
+        role = get_ping_role(interaction.guild)
+
+        if role is None:
+            return await interaction.response.send_message(
+                "❌ The queue-stop ping role isn't configured (or I can't see it). Ask an admin to set `QUEUE_STOP_PING_ROLE_ID`.",
+                ephemeral=True,
+            )
+
+        member = interaction.user  # Member in a guild interaction
+        new_state = role not in member.roles
+        try:
+            if new_state:
+                await member.add_roles(role, reason="Opted into queue-stop pings")
+            else:
+                await member.remove_roles(role, reason="Opted out of queue-stop pings")
+        except discord.Forbidden:
+            return await interaction.response.send_message(
+                "❌ I don't have permission to manage that role. It must be **below my top role** and I need **Manage Roles**.",
+                ephemeral=True,
+            )
+        await interaction.response.edit_message(view=MoreOptionsView(uid, interaction, ping_opt_in=new_state))
 
     @discord.ui.button(label="Schedule Vacation", emoji="🏖️", style=discord.ButtonStyle.blurple)
     async def schedule_vacation(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -734,10 +732,21 @@ class RemoveVacationRow(discord.ui.ActionRow):
 
 
 class MoreOptionsView(discord.ui.LayoutView):
-    def __init__(self, user_id: str, bound_interaction: discord.Interaction | None = None):
+    def __init__(self, user_id: str, bound_interaction: discord.Interaction | None = None,
+                 ping_opt_in: bool | None = None):
         super().__init__(timeout=120)
         self.user_id = user_id
         self.bound_interaction = bound_interaction
+
+        # Resolve current opt-in state (does the member have the ping role?)
+        if ping_opt_in is None:
+            ping_opt_in = False
+            if bound_interaction is not None:
+                role = get_ping_role(bound_interaction.guild)
+                member = bound_interaction.user
+                if role is not None and isinstance(member, discord.Member):
+                    ping_opt_in = role in member.roles
+        self.ping_opt_in = ping_opt_in
 
         vacations = store.storage.get("vacations", {}).get(user_id, [])
 

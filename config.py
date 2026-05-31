@@ -14,4 +14,7 @@ SUPPORT_ROLE_ID        = os.getenv("SUPPORT_ROLE_ID")
 MODERATION_ROLE_ID     = os.getenv("MODERATION_ROLE_ID")
 ADMINISTRATION_ROLE_ID = os.getenv("ADMINISTRATION_ROLE_ID")
 
+_qs_role = os.getenv("QUEUE_STOP_PING_ROLE_ID")
+QUEUE_STOP_PING_ROLE_ID = int(_qs_role) if _qs_role else None
+
 GUILD_LIST = [discord.Object(id=GUILD_ID)]
