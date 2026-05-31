@@ -36,8 +36,22 @@ def is_owner_member(member: discord.Member) -> bool:
     return any(r.id == config.OWNER_ROLE_ID for r in member.roles)
 
 
-def count_eligible(guild: discord.Guild) -> int:
-    """Number of people eligible to vote = council role holders ∪ owner role holders."""
+async def count_eligible(guild: discord.Guild) -> int:
+    """Number of people eligible to vote = council role holders ∪ owner role holders.
+
+    Relies on the member cache, which requires the Server Members intent. If the
+    guild hasn't been chunked yet, fetch it so role.members is complete.
+    """
+    if not guild.chunked:
+        try:
+            await guild.chunk()
+        except Exception as e:
+            print(f"Failed to chunk guild for eligible count: {e}")
+    return _count_eligible_cached(guild)
+
+
+def _count_eligible_cached(guild: discord.Guild) -> int:
+    """Synchronous count from the current cache (no chunking)."""
     council = guild.get_role(config.COUNCIL_ROLE_ID)
     owner = guild.get_role(config.OWNER_ROLE_ID)
     voters = set()
@@ -254,21 +268,21 @@ class VoteView(discord.ui.View):
         await _refresh_vote_message(interaction.client, vote)
 
         # Early close if everyone eligible has voted
-        eligible = vote.get("eligible_snapshot") or count_eligible(interaction.guild)
+        eligible = vote.get("eligible_snapshot") or await count_eligible(interaction.guild)
         if len(vote["votes"]) >= eligible:
             await _close_voting(interaction.client, vote)
 
         await interaction.response.send_message(f"Recorded your vote: **{choice}**", ephemeral=True)
 
-    @discord.ui.button(label="Approve", style=discord.ButtonStyle.green, emoji="✅", custom_id="cv:yes")
+    @discord.ui.button(label="Yes", style=discord.ButtonStyle.green, emoji="✅", custom_id="cv:yes")
     async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._cast(interaction, "yes")
 
-    @discord.ui.button(label="Oppose", style=discord.ButtonStyle.red, emoji="❌", custom_id="cv:no")
+    @discord.ui.button(label="No", style=discord.ButtonStyle.red, emoji="❌", custom_id="cv:no")
     async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._cast(interaction, "no")
 
-    @discord.ui.button(label="Abstain", style=discord.ButtonStyle.gray, emoji="➖", custom_id="cv:abstain")
+    @discord.ui.button(label="Abstain", style=discord.ButtonStyle.gray, emoji="🤐", custom_id="cv:abstain")
     async def abstain(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._cast(interaction, "abstain")
 
@@ -491,7 +505,7 @@ async def _open_voting(client: commands.Bot, vote: dict):
     guild = client.get_guild(config.GUILD_ID)
     vote["status"] = "voting"
     vote["voting_ends_at"] = datetime.datetime.now().timestamp() + vote["voting_period"]
-    vote["eligible_snapshot"] = count_eligible(guild)
+    vote["eligible_snapshot"] = await count_eligible(guild)
     store.save_data()
     await _refresh_vote_message(client, vote)
     await council_log(client, f"🗳️ Voting opened for **{vote['title']}** (`{vote['id']}`).")
@@ -499,7 +513,7 @@ async def _open_voting(client: commands.Bot, vote: dict):
 
 async def _close_voting(client: commands.Bot, vote: dict):
     guild = client.get_guild(config.GUILD_ID)
-    eligible = vote.get("eligible_snapshot") or count_eligible(guild)
+    eligible = vote.get("eligible_snapshot") or await count_eligible(guild)
     yes, no, abstain = tally(vote)
     outcome = vl.resolve(vote["mode"], eligible, yes, no, abstain)
 
