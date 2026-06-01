@@ -57,6 +57,13 @@ class BotClient(commands.Bot):
         )
         self._council_cog = await setup_council(self)
 
+        for guild_obj in GUILD_LIST:
+            try:
+                synced = await self.tree.sync(guild=guild_obj)
+                print(f"Synced {len(synced)} commands to guild {guild_obj.id}")
+            except Exception as e:
+                print(f"Error syncing commands: {e}")
+
     async def on_ready(self):
         print(f"Logged in as {self.user}")
 
@@ -68,22 +75,17 @@ class BotClient(commands.Bot):
         store.load_data()
         await setup_status_message(self, STATUS_CHANNEL_ID.id)
 
-        # Start task loops
-        self._status_cog.cleanup_expired_statuses.start()
-        self._elo_cog.cleanup_old_sessions.start()
-        self._council_cog.tick.start()
-        self.autoclose_tickets.start()
-        if HEARTBEAT_URL:
+        for loop in (
+            self._status_cog.cleanup_expired_statuses,
+            self._elo_cog.cleanup_old_sessions,
+            self._council_cog.tick,
+            self.autoclose_tickets,
+        ):
+            if not loop.is_running():
+                loop.start()
+        if HEARTBEAT_URL and not self.heartbeat.is_running():
             self.heartbeat.start()
             print(f"Heartbeat task started, pinging every 60 seconds")
-
-        # Sync slash commands
-        for guild_obj in GUILD_LIST:
-            try:
-                synced = await self.tree.sync(guild=guild_obj)
-                print(f"Synced {len(synced)} commands to guild {guild_obj.id}")
-            except Exception as e:
-                print(f"Error syncing commands: {e}")
 
     # ---- task loops ----
 
