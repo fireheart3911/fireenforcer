@@ -12,7 +12,7 @@ def load_data():
             count = storage.get("id_count", count)
 
             # Ensure all top-level keys exist
-            for key in ("tickets", "status_message", "user_statuses", "elo_players", "elo_sessions", "elo_types", "vacations", "user_prefs", "queue_stop_thread", "votes", "vote_blocks"):
+            for key in ("tickets", "status_message", "user_statuses", "elo_players", "elo_sessions", "elo_types", "vacations", "user_prefs", "queue_stop_thread", "votes", "vote_blocks", "alt_links"):
                 storage.setdefault(key, {})
 
             # Migrate old flat elo_players format → nested per-type format

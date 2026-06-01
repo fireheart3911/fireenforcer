@@ -36,6 +36,28 @@ def is_owner_member(member: discord.Member) -> bool:
     return any(r.id == config.OWNER_ROLE_ID for r in member.roles)
 
 
+# ---- Alt-account linking --------------------------------------------------
+# storage["alt_links"][alt_id] = primary_id  (an alt maps to its primary)
+
+def primary_of(user_id: str) -> str:
+    """Resolve a user to their primary account (itself if not an alt)."""
+    return store.storage.get("alt_links", {}).get(str(user_id), str(user_id))
+
+
+def link_alt(alt_id: str, primary_id: str):
+    store.storage.setdefault("alt_links", {})[str(alt_id)] = str(primary_id)
+    store.save_data()
+
+
+def unlink_alt(alt_id: str) -> bool:
+    links = store.storage.setdefault("alt_links", {})
+    if str(alt_id) in links:
+        del links[str(alt_id)]
+        store.save_data()
+        return True
+    return False
+
+
 async def count_eligible(guild: discord.Guild) -> int:
     """Number of people eligible to vote = council role holders ∪ owner role holders.
 
@@ -51,14 +73,18 @@ async def count_eligible(guild: discord.Guild) -> int:
 
 
 def _count_eligible_cached(guild: discord.Guild) -> int:
-    """Synchronous count from the current cache (no chunking)."""
+    """Synchronous count from the current cache (no chunking).
+
+    Alts are collapsed to their primary so a person with multiple ranked
+    accounts is only counted once.
+    """
     council = guild.get_role(config.COUNCIL_ROLE_ID)
     owner = guild.get_role(config.OWNER_ROLE_ID)
     voters = set()
     if council:
-        voters.update(m.id for m in council.members)
+        voters.update(primary_of(m.id) for m in council.members)
     if owner:
-        voters.update(m.id for m in owner.members)
+        voters.update(primary_of(m.id) for m in owner.members)
     return len(voters)
 
 
@@ -135,6 +161,22 @@ def tally(vote: dict) -> tuple[int, int, int]:
     return yes, no, abstain
 
 
+def effective_eligible(vote: dict, guild: discord.Guild = None) -> int:
+    """Eligible count minus recused voters (recusal shrinks the denominator).
+
+    Uses the snapshot taken at voting open when present; otherwise the live
+    cached count. Recusal is not permitted under true_unanimous, so the
+    recused list is ignored in that mode.
+    """
+    base = vote.get("eligible_snapshot")
+    if base is None:
+        base = _count_eligible_cached(guild) if guild else 0
+    if vote.get("mode") == "true_unanimous":
+        return base
+    recused = len(vote.get("recused", []))
+    return max(0, base - recused)
+
+
 # ---------------------------------------------------------------------------
 # Embeds
 # ---------------------------------------------------------------------------
@@ -189,24 +231,29 @@ def build_vote_embed(guild: discord.Guild, vote: dict) -> discord.Embed:
     # Vote counts according to visibility
     if status in ("voting", "veto") or status in ("passed", "applied", "failed", "blocked", "expired", "vetoed", "quashed"):
         yes, no, abstain = tally(vote)
-        eligible = vote.get("eligible_snapshot") or _count_eligible_cached(guild)
+        eligible = effective_eligible(vote, guild)
+        recused = len(vote.get("recused", []))
         vis = vote.get("visibility", "counts")
         if vis == "hidden" and status == "voting":
             voted = len(vote["votes"])
-            embed.add_field(name="Participation", value=f"{voted}/{eligible} have voted", inline=False)
+            extra = f" · {recused} recused" if recused else ""
+            embed.add_field(name="Participation", value=f"{voted}/{eligible} have voted{extra}", inline=False)
         else:
             need = vl.required_yes(vote["mode"], eligible)
+            recused_line = f"\nRecused: {recused}" if recused else ""
             embed.add_field(
                 name="Tally",
-                value=f"✅ Yes: **{yes}**  ·  ❌ No: **{no}**  ·  🤐 Abstain: **{abstain}**\n"
-                      f"Eligible: {eligible} · Needed to pass: {need}",
+                value=f"✅ Approve: **{yes}**  ·  ❌ Oppose: **{no}**  ·  ➖ Abstain: **{abstain}**\n"
+                      f"Eligible: {eligible} · Needed to pass: {need}{recused_line}",
                 inline=False,
             )
             if vis == "full":
                 lines = []
                 for uid, choice in vote["votes"].items():
-                    icon = {"yes": "✅", "no": "❌", "abstain": "🤐"}[choice]
+                    icon = {"yes": "✅", "no": "❌", "abstain": "➖"}[choice]
                     lines.append(f"{icon} <@{uid}>")
+                for uid in vote.get("recused", []):
+                    lines.append(f"🚪 <@{uid}> (recused)")
                 if lines:
                     embed.add_field(name="Voters", value="\n".join(lines), inline=False)
 
@@ -250,7 +297,7 @@ class CommentView(discord.ui.View):
 
 
 class VoteView(discord.ui.View):
-    """Yes / No / Abstain buttons during the voting period."""
+    """Approve / Oppose / Abstain / Recuse buttons during the voting period."""
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -264,28 +311,68 @@ class VoteView(discord.ui.View):
             return await interaction.response.send_message("❌ Only council/owners may vote.", ephemeral=True)
 
         await interaction.response.defer(ephemeral=True)
-        vote["votes"][str(interaction.user.id)] = choice
+        # Collapse alt accounts to the primary so one person = one vote.
+        voter = primary_of(interaction.user.id)
+        vote["votes"][voter] = choice
+        # Casting a real vote un-recuses you.
+        if voter in vote.get("recused", []):
+            vote["recused"].remove(voter)
         store.save_data()
         await _refresh_vote_message(interaction.client, vote)
 
-        # Early close if everyone eligible has voted
-        eligible = vote.get("eligible_snapshot") or await count_eligible(interaction.guild)
+        # Early close if every (non-recused) eligible voter has voted.
+        eligible = effective_eligible(vote, interaction.guild)
         if len(vote["votes"]) >= eligible:
             await _close_voting(interaction.client, vote)
 
         await interaction.followup.send(f"Recorded your vote: **{choice}**", ephemeral=True)
 
-    @discord.ui.button(label="Yes", style=discord.ButtonStyle.green, emoji="✅", custom_id="cv:yes")
+    @discord.ui.button(label="Approve", style=discord.ButtonStyle.green, emoji="✅", custom_id="cv:yes")
     async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._cast(interaction, "yes")
 
-    @discord.ui.button(label="No", style=discord.ButtonStyle.red, emoji="❌", custom_id="cv:no")
+    @discord.ui.button(label="Oppose", style=discord.ButtonStyle.red, emoji="❌", custom_id="cv:no")
     async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._cast(interaction, "no")
 
-    @discord.ui.button(label="Abstain", style=discord.ButtonStyle.gray, emoji="🤐", custom_id="cv:abstain")
+    @discord.ui.button(label="Abstain", style=discord.ButtonStyle.gray, emoji="➖", custom_id="cv:abstain")
     async def abstain(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._cast(interaction, "abstain")
+
+    @discord.ui.button(label="Recuse", style=discord.ButtonStyle.gray, emoji="🚪", custom_id="cv:recuse")
+    async def recuse(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vote = _find_vote_by_thread(interaction.channel_id)
+        if not vote:
+            return await interaction.response.send_message("❌ No vote bound to this thread.", ephemeral=True)
+        if vote["status"] != "voting":
+            return await interaction.response.send_message("❌ Voting is not currently open.", ephemeral=True)
+        if not is_council(interaction.user):
+            return await interaction.response.send_message("❌ Only council/owners may recuse.", ephemeral=True)
+        if vote["mode"] == "true_unanimous":
+            return await interaction.response.send_message(
+                "❌ Recusal isn't allowed under a True Unanimous vote.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        voter = primary_of(interaction.user.id)
+        recused = vote.setdefault("recused", [])
+        if voter in recused:
+            # Toggle off — un-recuse.
+            recused.remove(voter)
+            msg = "↩️ You are no longer recused."
+        else:
+            recused.append(voter)
+            # Recusing removes any cast vote.
+            vote["votes"].pop(voter, None)
+            msg = "🚪 You have recused yourself from this vote."
+        store.save_data()
+        await _refresh_vote_message(interaction.client, vote)
+
+        # Recusing can lower the threshold enough that the vote should resolve.
+        eligible = effective_eligible(vote, interaction.guild)
+        if eligible > 0 and len(vote["votes"]) >= eligible:
+            await _close_voting(interaction.client, vote)
+
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 class VetoView(discord.ui.View):
@@ -545,7 +632,7 @@ async def _open_voting(client: commands.Bot, vote: dict):
 
 async def _close_voting(client: commands.Bot, vote: dict):
     guild = client.get_guild(config.GUILD_ID)
-    eligible = vote.get("eligible_snapshot") or await count_eligible(guild)
+    eligible = effective_eligible(vote, guild)
     yes, no, abstain = tally(vote)
     outcome = vl.resolve(vote["mode"], eligible, yes, no, abstain)
 
@@ -819,6 +906,47 @@ class CouncilCog(commands.Cog):
                 return await interaction.response.send_message("❌ Council/owners only.", ephemeral=True)
             await interaction.response.send_modal(ProposalModal(self))
 
+        council_group = self.council_group
+
+        @council_group.command(name="link", description="[OWNER] Link an alt account to a primary (counts as one voter)")
+        @app_commands.describe(alt="The secondary account", primary="The main account it belongs to")
+        async def council_link(interaction: discord.Interaction, alt: discord.Member, primary: discord.Member):
+            if not is_owner_member(interaction.user):
+                return await interaction.response.send_message("❌ Owners only.", ephemeral=True)
+            if alt.id == primary.id:
+                return await interaction.response.send_message("❌ An account can't be linked to itself.", ephemeral=True)
+            # Prevent chains: if 'primary' is itself an alt, point to its root.
+            root = primary_of(primary.id)
+            if str(alt.id) == root:
+                return await interaction.response.send_message("❌ That would create a circular link.", ephemeral=True)
+            link_alt(alt.id, root)
+            await council_log(self.bot,
+                              f"🔗 <@{interaction.user.id}> linked alt <@{alt.id}> → primary <@{root}>.")
+            await interaction.response.send_message(
+                f"🔗 Linked {alt.mention} as an alt of <@{root}>. They now count as one voter.",
+                ephemeral=True)
+
+        @council_group.command(name="unlink", description="[OWNER] Remove an alt-account link")
+        @app_commands.describe(alt="The secondary account to unlink")
+        async def council_unlink(interaction: discord.Interaction, alt: discord.Member):
+            if not is_owner_member(interaction.user):
+                return await interaction.response.send_message("❌ Owners only.", ephemeral=True)
+            if unlink_alt(alt.id):
+                await council_log(self.bot, f"🔗 <@{interaction.user.id}> unlinked alt <@{alt.id}>.")
+                await interaction.response.send_message(f"🔗 Unlinked {alt.mention}.", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ {alt.mention} isn't linked as an alt.", ephemeral=True)
+
+        @council_group.command(name="links", description="[OWNER] List all linked alt accounts")
+        async def council_links(interaction: discord.Interaction):
+            if not is_owner_member(interaction.user):
+                return await interaction.response.send_message("❌ Owners only.", ephemeral=True)
+            links = store.storage.get("alt_links", {})
+            if not links:
+                return await interaction.response.send_message("No alt accounts are linked.", ephemeral=True)
+            lines = [f"• <@{alt}> → <@{primary}>" for alt, primary in links.items()]
+            await interaction.response.send_message("**Linked alt accounts:**\n" + "\n".join(lines), ephemeral=True)
+
     async def _create_vote(self, interaction, kind, title, description, target, voting_period):
         guild = interaction.guild
         now = datetime.datetime.now().timestamp()
@@ -858,6 +986,7 @@ class CouncilCog(commands.Cog):
             "voting_period": voting_period,
             "eligible_snapshot": None,
             "votes": {},
+            "recused": [],
         }
         store.storage.setdefault("votes", {})[vote_id] = vote
 
