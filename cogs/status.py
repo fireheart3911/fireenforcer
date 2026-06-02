@@ -4,8 +4,54 @@ import re
 import discord
 from discord.ext import commands, tasks
 
+try:
+    from zoneinfo import ZoneInfo, available_timezones
+except ImportError:  # pragma: no cover
+    ZoneInfo = None
+    available_timezones = lambda: set()
+
 import storage as store
 import config
+
+
+DEFAULT_TZ = "Europe/Berlin"
+
+
+def get_user_tz_name(user_id: str) -> str:
+    """The user's stored IANA timezone, or the Europe/Berlin default."""
+    return store.storage.get("user_prefs", {}).get(str(user_id), {}).get("timezone", DEFAULT_TZ)
+
+
+def get_user_tz(user_id: str):
+    """A ZoneInfo for the user, falling back to the default if unset/invalid."""
+    if ZoneInfo is None:
+        return None
+    name = get_user_tz_name(user_id)
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        try:
+            return ZoneInfo(DEFAULT_TZ)
+        except Exception:
+            return None
+
+
+def validate_tz_name(name: str) -> str:
+    """Return a canonical IANA name or raise ValueError.
+
+    On Windows this needs the `tzdata` package; we surface a helpful message.
+    """
+    name = name.strip()
+    if ZoneInfo is None:
+        raise ValueError("Timezone support is unavailable on this Python build.")
+    try:
+        ZoneInfo(name)
+    except Exception:
+        raise ValueError(
+            f"Unknown timezone '{name}'. Use an IANA name like `Europe/Berlin` or `Asia/Tokyo`.\n"
+            "(If you're on Windows and every name fails, run `pip install tzdata`.)"
+        )
+    return name
 
 
 # ---------------------------------------------------------------------------
@@ -31,33 +77,32 @@ _DURATION_RE = re.compile(r"(\d+)\s*([dhm])")
 # Parse helpers
 # ---------------------------------------------------------------------------
 
-def parse_away_duration(text: str) -> datetime.datetime | None:
+def parse_away_duration(text: str, tz=None) -> datetime.datetime | None:
     """Parse an away time. Returns a future datetime, or None for indefinite.
 
     Accepts:
       - "" / "indefinite" / "none" / "-"  → None (no set return)
-      - duration combos: "30m", "2h", "2h30m", "1d6h"
-      - absolute clock time: "14:30" (next occurrence)
+      - duration combos: "30m", "2h", "2h30m", "1d6h"  (timezone-independent)
+      - absolute clock time: "14:30" — interpreted in `tz` (the user's zone)
     Raises ValueError on anything else.
     """
     text = text.strip().lower()
     if not text or text in ("indefinite", "none", "-"):
         return None
 
-    now = datetime.datetime.now()
-
     # Absolute HH:MM (only if there are no duration units present)
     if ":" in text and not _DURATION_RE.search(text):
         try:
             hour, minute = map(int, text.split(":"))
-            return_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         except ValueError:
             raise ValueError("Invalid clock time. Use HH:MM, e.g. 14:30")
-        if return_time <= now:
+        now_tz = datetime.datetime.now(tz)  # aware if tz given
+        return_time = now_tz.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if return_time <= now_tz:
             return_time += datetime.timedelta(days=1)
         return return_time
 
-    # Duration combo — make sure the whole string is valid units (no stray chars)
+    # Duration combo — zone-independent, relative to now
     matches = _DURATION_RE.findall(text)
     consumed = "".join(f"{n}{u}" for n, u in matches)
     if not matches or consumed != re.sub(r"\s+", "", text):
@@ -69,30 +114,30 @@ def parse_away_duration(text: str) -> datetime.datetime | None:
         delta += datetime.timedelta(days=num) if unit == "d" else \
                  datetime.timedelta(hours=num) if unit == "h" else \
                  datetime.timedelta(minutes=num)
-    return now + delta
+    return datetime.datetime.now() + delta
 
 
-def parse_play_start(text: str) -> datetime.datetime:
+def parse_play_start(text: str, tz=None) -> datetime.datetime:
     """Parse a 'playing since' time for in-game status (counts UP).
 
     Accepts:
       - "" → now (just started)
-      - duration combos: "30m", "2h30m" → that long ago
-      - absolute clock time: "14:30" → today (or yesterday if that's in the future)
+      - duration combos: "30m", "2h30m" → that long ago  (timezone-independent)
+      - absolute clock time: "14:30" → today in `tz` (or yesterday if future)
     Raises ValueError on anything else.
     """
     text = text.strip().lower()
-    now = datetime.datetime.now()
     if not text:
-        return now
+        return datetime.datetime.now()
 
     if ":" in text and not _DURATION_RE.search(text):
         try:
             hour, minute = map(int, text.split(":"))
-            start = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         except ValueError:
             raise ValueError("Invalid clock time. Use HH:MM, e.g. 14:30")
-        if start > now:
+        now_tz = datetime.datetime.now(tz)
+        start = now_tz.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if start > now_tz:
             start -= datetime.timedelta(days=1)
         return start
 
@@ -107,7 +152,7 @@ def parse_play_start(text: str) -> datetime.datetime:
         delta += datetime.timedelta(days=num) if unit == "d" else \
                  datetime.timedelta(hours=num) if unit == "h" else \
                  datetime.timedelta(minutes=num)
-    return now - delta
+    return datetime.datetime.now() - delta
 
 
 def parse_vacation_datetime(text: str) -> datetime.datetime:
@@ -167,17 +212,6 @@ def normalize_tz_offset(text: str) -> str:
     return f"UTC{sign}{h}" + (f":{mm:02d}" if mm else "")
 
 
-def format_reachability(reachability: str, tz_note: str = "") -> str:
-    """Render the 'how to reach me' info consistently for the board."""
-    parts = []
-    if reachability:
-        parts.append(f"📱 {reachability}")
-    tz = normalize_tz_offset(tz_note)
-    if tz:
-        parts.append(f"🌍 {tz}")
-    return " · ".join(parts) if parts else "📱 reachability not specified"
-
-
 # ---------------------------------------------------------------------------
 # Board rendering
 # ---------------------------------------------------------------------------
@@ -198,23 +232,24 @@ def _build_status_embed() -> discord.Embed:
     for info in store.storage.get("user_statuses", {}).values():
         active_lines.append(info["message"])
 
-    upcoming_vac = []
+    upcoming_vac = []  # (start_at, line) so we can sort by start
     for uid, vac_list in store.storage.get("vacations", {}).items():
         for v in vac_list:
-            # Board shows the essentials only (tz kept for the More Options panel)
-            reach = v.get("reachability", "").strip()
-            reach_part = f" · 📱 {reach}" if reach else ""
+            # Board shows destination + timezone (reachability removed).
+            tz = normalize_tz_offset(v.get("tz_note", ""))
+            tz_part = f" · 🌍 {tz}" if tz else ""
             dest = v.get("destination", "").strip()
             if v["start_at"] <= now <= v["end_at"]:
                 head = dest if dest else "on vacation"
                 active_lines.append(
-                    f"🏖️ <@{uid}> · {head} · back <t:{int(v['end_at'])}:R>{reach_part}"
+                    f"🏖️ <@{uid}> · {head} · back <t:{int(v['end_at'])}:R>{tz_part}"
                 )
             elif v["start_at"] > now:
                 dest_part = f"{dest} · " if dest else ""
-                upcoming_vac.append(
-                    f"📅 <@{uid}> · {dest_part}<t:{int(v['start_at'])}:d>–<t:{int(v['end_at'])}:d>{reach_part}"
-                )
+                upcoming_vac.append((
+                    v["start_at"],
+                    f"📅 <@{uid}> · {dest_part}<t:{int(v['start_at'])}:d>–<t:{int(v['end_at'])}:d>{tz_part}"
+                ))
 
     if active_lines:
         embed.add_field(name="🔔 Active Statuses", value="\n".join(active_lines), inline=False)
@@ -222,7 +257,9 @@ def _build_status_embed() -> discord.Embed:
         embed.add_field(name="🔔 Active Statuses", value="No active statuses", inline=False)
 
     if upcoming_vac:
-        embed.add_field(name="📅 Upcoming Vacations", value="\n".join(upcoming_vac), inline=False)
+        upcoming_vac.sort(key=lambda t: t[0])
+        embed.add_field(name="📅 Upcoming Vacations",
+                        value="\n".join(line for _, line in upcoming_vac), inline=False)
 
     embed.set_footer(text="Use the buttons below to update your status")
     return embed
@@ -513,7 +550,7 @@ class AwayModal(discord.ui.Modal):
         # --- gaming: count up from a start time ---
         if self.away_type == "gaming":
             try:
-                start = parse_play_start(self.since_input.value)
+                start = parse_play_start(self.since_input.value, get_user_tz(user_id))
             except ValueError as e:
                 return await interaction.response.send_message(f"❌ {e}", ephemeral=True)
 
@@ -542,7 +579,7 @@ class AwayModal(discord.ui.Modal):
 
         # --- everything else: count down to a return time ---
         try:
-            return_dt = parse_away_duration(self.time_input.value)
+            return_dt = parse_away_duration(self.time_input.value, get_user_tz(user_id))
         except ValueError as e:
             return await interaction.response.send_message(f"❌ {e}", ephemeral=True)
 
@@ -594,18 +631,13 @@ class VacationModal(discord.ui.Modal):
             placeholder="e.g. Tokyo, Japan",
             required=False, max_length=60,
         )
-        self.reachability_input = discord.ui.TextInput(
-            label="How can people reach you while away?",
-            placeholder="e.g. Discord on phone only / not reachable / email is fastest",
-            required=True, max_length=80,
-        )
         self.tz_input = discord.ui.TextInput(
             label="Your timezone while away (info only)",
             placeholder="e.g. JST, PST, UTC+9 — shown so people know your hours",
+            default=normalize_tz_offset(get_user_tz_name(owner_view.user_id)) if owner_view else "",
             required=False, max_length=40,
         )
-        for item in (self.start_input, self.end_input, self.destination_input,
-                     self.reachability_input, self.tz_input):
+        for item in (self.start_input, self.end_input, self.destination_input, self.tz_input):
             self.add_item(item)
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -629,7 +661,6 @@ class VacationModal(discord.ui.Modal):
             "start_at": int(start_dt.timestamp()),
             "end_at": int(end_dt.timestamp()),
             "destination": self.destination_input.value.strip(),
-            "reachability": self.reachability_input.value.strip(),
             "tz_note": self.tz_input.value.strip(),
             "created_at": str(now.timestamp()),
         })
@@ -642,6 +673,34 @@ class VacationModal(discord.ui.Modal):
 
         # Refresh the More Options panel so the new vacation appears in the list
         await interaction.response.edit_message(view=MoreOptionsView(user_id, interaction))
+
+
+# ---------------------------------------------------------------------------
+# Timezone modal
+# ---------------------------------------------------------------------------
+
+class TimezoneModal(discord.ui.Modal, title="Set Your Timezone"):
+    def __init__(self, owner_view: "MoreOptionsView"):
+        super().__init__()
+        self.owner_view = owner_view
+        self.tz_input = discord.ui.TextInput(
+            label="IANA timezone name",
+            placeholder="e.g. Europe/Berlin, Asia/Tokyo, America/New_York",
+            default=get_user_tz_name(owner_view.user_id),
+            required=True, max_length=50,
+        )
+        self.add_item(self.tz_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            name = validate_tz_name(self.tz_input.value)
+        except ValueError as e:
+            return await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+
+        uid = str(interaction.user.id)
+        store.storage.setdefault("user_prefs", {}).setdefault(uid, {})["timezone"] = name
+        store.save_data()
+        await interaction.response.edit_message(view=MoreOptionsView(uid, interaction))
 
 
 # ---------------------------------------------------------------------------
@@ -697,6 +756,10 @@ class PrefsRow(discord.ui.ActionRow):
     async def schedule_vacation(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(VacationModal(self.owner))
 
+    @discord.ui.button(label="Set Timezone", emoji="🌍", style=discord.ButtonStyle.gray)
+    async def set_timezone(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TimezoneModal(self.owner))
+
 
 class RemoveVacationRow(discord.ui.ActionRow):
     def __init__(self, view: "MoreOptionsView", vacations: list):
@@ -708,9 +771,10 @@ class RemoveVacationRow(discord.ui.ActionRow):
             end = datetime.datetime.fromtimestamp(v["end_at"]).strftime("%Y-%m-%d")
             dest = v.get("destination", "").strip()
             label = f"{start} → {end}" + (f" · {dest}" if dest else "")
+            tz = normalize_tz_offset(v.get("tz_note", ""))
             options.append(discord.SelectOption(
                 label=label[:100],
-                description=(v.get("reachability", "")[:90] or None),
+                description=(f"🌍 {tz}" if tz else None),
                 value=v["id"],
             ))
         self.remove_select.options = options
@@ -754,10 +818,11 @@ class MoreOptionsView(discord.ui.LayoutView):
         if vacations:
             lines = ["**Your scheduled vacations:**"]
             for v in sorted(vacations, key=lambda x: x["start_at"]):
-                reach = format_reachability(v.get("reachability", ""), v.get("tz_note", ""))
+                tz = normalize_tz_offset(v.get("tz_note", ""))
+                tz_part = f" · 🌍 {tz}" if tz else ""
                 dest = v.get("destination", "").strip()
                 dest_part = f"📍 {dest} · " if dest else ""
-                lines.append(f"• {dest_part}<t:{int(v['start_at'])}:d> → <t:{int(v['end_at'])}:d> · {reach}")
+                lines.append(f"• {dest_part}<t:{int(v['start_at'])}:d> → <t:{int(v['end_at'])}:d>{tz_part}")
             vac_text = "\n".join(lines)
         else:
             vac_text = "*You have no scheduled vacations.*"
@@ -765,7 +830,9 @@ class MoreOptionsView(discord.ui.LayoutView):
         container = discord.ui.Container(accent_colour=discord.Color.blurple())
         container.add_item(discord.ui.TextDisplay(
             "## ⚙️ More Options\n"
-            "Set a typed away status, manage queue-stop pings, or schedule vacations."
+            "Set a typed away status, manage queue-stop pings, or schedule vacations.\n"
+            f"Your timezone: **{get_user_tz_name(user_id)}** "
+            "(used to interpret clock times like `14:30`)."
         ))
         container.add_item(discord.ui.Separator())
         container.add_item(AwayTypeRow())
