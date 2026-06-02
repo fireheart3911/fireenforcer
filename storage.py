@@ -42,7 +42,20 @@ def load_data():
             if vac_migrated:
                 print("Migrated vacations to new multi-vacation list format")
 
+            # Prune finished elo sessions — terminal states are kept only in logs.
+            terminal = ("cancelled", "denied", "verified", "expired")
+            stale = [sid for sid, s in storage["elo_sessions"].items()
+                     if s.get("status") in terminal]
+            for sid in stale:
+                del storage["elo_sessions"][sid]
+            if stale:
+                print(f"Pruned {len(stale)} finished elo session(s)")
+
             print(f"Loaded data. Current count: {count}")
+
+            # If load-time cleanup/migrations changed anything, flush to disk now.
+            if stale or vac_migrated:
+                save_data()
 
     except FileNotFoundError:
         storage = {
