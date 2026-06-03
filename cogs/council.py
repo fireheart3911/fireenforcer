@@ -1084,7 +1084,7 @@ class CouncilCog(commands.Cog):
                                f"now closes <t:{int(vote['voting_ends_at'])}:R>")
             await interaction.followup.send("✅ Voting time updated.", ephemeral=True)
 
-        @admin_vote.command(name="recuse", description="[OWNER] Recuse a user from a running vote (e.g. unavailable)")
+        @admin_vote.command(name="forcerecuse", description="[OWNER] Recuse a user from a running vote (e.g. unavailable)")
         @app_commands.describe(vote_id="The vote to modify", user="The user to recuse")
         @app_commands.autocomplete(vote_id=_active_vote_autocomplete)
         async def admin_vote_recuse(interaction: discord.Interaction, vote_id: str, user: discord.Member):
