@@ -336,7 +336,7 @@ class VoteView(discord.ui.View):
     async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._cast(interaction, "yes")
 
-    @discord.ui.button(label="Oppose", style=discord.ButtonStyle.red, emoji="❌", custom_id="cv:no")
+    @discord.ui.button(label="Oppose", style=discord.ButtonStyle.red, emoji="✖️", custom_id="cv:no")
     async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._cast(interaction, "no")
 
