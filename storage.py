@@ -48,7 +48,7 @@ def save_data():
     storage["id_count"] = count
     with open("data.json", "w", encoding="utf-8") as f:
         json.dump(storage, f, indent=4, ensure_ascii=False)
-    print("Successfully saved data to local storage.")
+    print("\033[95m[Storage] Data saved to file.\033[0m")
 
 
 def next_id() -> int:

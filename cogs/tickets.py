@@ -125,11 +125,32 @@ async def close_ticket(client: commands.Bot, thread: discord.Thread, ticket_id: 
         embed.add_field(name="📑 Topic", value=data.get("reason", "—"), inline=True)
         embed.add_field(name="🛠️ Category", value=cat_label, inline=True)
         if reason:
-            embed.add_field(name="📝 Close Reason", value=reason, inline=False)
+            embed.add_field(name="📝 Close Reason", value=reason, inline=True)
         try:
             await log_channel.send(embed=embed)
         except discord.HTTPException:
             pass
+
+    # --- DM the owner ---
+    if data:
+        try:
+            owner = await client.fetch_user(int(data["user_id"]))
+            cat_label = TICKET_CATEGORIES.get(data.get("ticket_type"), {}).get("label", data.get("ticket_type", "?"))
+            dm = discord.Embed(
+                title="Your ticket was closed",
+                description=(f"Your **{cat_label}** ticket (#{ticket_id}) has been closed."
+                            + (" It auto-closed because there was no response to the close request."
+                               if auto else "")),
+                color=discord.Color.orange() if auto else discord.Color.green(),
+                timestamp=datetime.datetime.now(),
+            )
+            if reason:
+                dm.add_field(name="📝 Reason", value=reason, inline=False)
+            dm.set_footer(text="If you still need help, feel free to open a new ticket.")
+            await owner.send(embed=dm)
+        except (discord.Forbidden, discord.HTTPException):
+            print("\033[93m[Tickets] Failed to DM owner of ticket #{ticket_id}.\033[0m")
+            pass  # DMs disabled or user unreachable — not fatal
 
     # --- archive + drop record ---
     try:
@@ -208,8 +229,8 @@ async def create_ticket(interaction: discord.Interaction, cat_key: str):
         embed.add_field(name="Reason", value=reason_input.value, inline=False)
 
         ping = f"<@&{role_id}>" if role_id else ""
-        await thread.send(f"{interaction.user.mention} {ping}".strip(),
-                          embed=embed, view=TicketControlView())
+        opened_msg = await thread.send(f"{interaction.user.mention} {ping}".strip(),
+                                       embed=embed, view=TicketControlView())
         await modal_interaction.response.send_message(f"✅ Ticket opened: {thread.mention}", ephemeral=True)
 
         store.storage.setdefault("tickets", {})[str(new_id)] = {
@@ -218,6 +239,7 @@ async def create_ticket(interaction: discord.Interaction, cat_key: str):
             "ticket_type": cat_key,
             "reason": str(reason_input.value),
             "thread_id": str(thread.id),
+            "message_id": str(opened_msg.id),
             "role_id": str(role_id) if role_id else None,
             "claimed_by": None,
             "timestamp": str(datetime.datetime.now().timestamp()),
@@ -231,6 +253,33 @@ async def create_ticket(interaction: discord.Interaction, cat_key: str):
 # ---------------------------------------------------------------------------
 # In-thread controls: Claim / Close
 # ---------------------------------------------------------------------------
+
+async def _update_ticket_embed(client: commands.Bot, thread: discord.Thread, data: dict):
+    """Re-render the original ticket-opened embed to reflect current claim state."""
+    msg_id = data.get("message_id")
+    if not msg_id:
+        return
+    try:
+        msg = await thread.fetch_message(int(msg_id))
+    except discord.HTTPException:
+        return
+    if not msg.embeds:
+        return
+
+    spec = TICKET_CATEGORIES.get(data.get("ticket_type"), {})
+    embed = msg.embeds[0]
+    # Rebuild fields: keep Reason, set/replace the Claimed field.
+    new = discord.Embed(title=embed.title, description=embed.description, color=embed.color)
+    new.add_field(name="Reason", value=data.get("reason", "—"), inline=False)
+    if data.get("claimed_by"):
+        new.add_field(name="🔖 Claimed by", value=f"<@{data['claimed_by']}>", inline=False)
+    else:
+        new.add_field(name="🔖 Status", value="Unclaimed", inline=False)
+    try:
+        await msg.edit(embed=new)
+    except discord.HTTPException:
+        pass
+
 
 class TicketControlView(discord.ui.View):
     def __init__(self):
@@ -249,17 +298,16 @@ class TicketControlView(discord.ui.View):
 
         if data.get("claimed_by"):
             if str(data["claimed_by"]) == str(interaction.user.id):
-                # Unclaim (toggle)
                 data["claimed_by"] = None
                 store.save_data()
-                await interaction.channel.send(f"↩️ {interaction.user.mention} released this ticket.")
-                return await interaction.response.send_message("Ticket unclaimed.", ephemeral=True)
+                await _update_ticket_embed(interaction.client, interaction.channel, data)
+                return await interaction.response.send_message("↩️ You released this ticket.", ephemeral=True)
             return await interaction.response.send_message(
                 f"❌ Already claimed by <@{data['claimed_by']}>. They must unclaim it first.", ephemeral=True)
 
         data["claimed_by"] = str(interaction.user.id)
         store.save_data()
-        await interaction.channel.send(f"🔖 {interaction.user.mention} claimed this ticket.")
+        await _update_ticket_embed(interaction.client, interaction.channel, data)
         await interaction.response.send_message("✅ You claimed this ticket.", ephemeral=True)
 
     @discord.ui.button(label="Close", style=discord.ButtonStyle.red, emoji="🔒", custom_id="tickets:close")
@@ -351,12 +399,14 @@ class TicketsCog(commands.Cog):
         self.bot = bot
 
     @app_commands.command(name="ticketpanel", description="Send the ticket panel with category buttons")
+    @app_commands.guilds(discord.Object(id=config.GUILD_ID))
     @app_commands.checks.has_permissions(manage_guild=True)
     async def ticketpanel(self, interaction: discord.Interaction):
         await interaction.channel.send(embed=_panel_embed(), view=TicketView())
         await interaction.response.send_message("Ticket panel sent!", ephemeral=True)
 
     @app_commands.command(name="closerequest", description="Ask the ticket owner whether the ticket can be closed")
+    @app_commands.guilds(discord.Object(id=config.GUILD_ID))
     @app_commands.describe(hours="Hours until the ticket auto-closes with no response",
                            reason="Optional reason, shown in the request and on close")
     async def closerequest(self, interaction: discord.Interaction, hours: float = 24.0, reason: str = None):
