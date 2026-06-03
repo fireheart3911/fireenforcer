@@ -36,6 +36,11 @@ def is_owner_member(member: discord.Member) -> bool:
     return any(r.id == config.OWNER_ROLE_ID for r in member.roles)
 
 
+def _member_is_bot(guild: discord.Guild, user_id) -> bool:
+    m = guild.get_member(int(user_id))
+    return bool(m and m.bot)
+
+
 # ---- Alt-account linking --------------------------------------------------
 # storage["alt_links"][alt_id] = primary_id  (an alt maps to its primary)
 
@@ -946,6 +951,57 @@ class CouncilCog(commands.Cog):
                 return await interaction.response.send_message("No alt accounts are linked.", ephemeral=True)
             lines = [f"• <@{alt}> → <@{primary}>" for alt, primary in links.items()]
             await interaction.response.send_message("**Linked alt accounts:**\n" + "\n".join(lines), ephemeral=True)
+
+        @council_group.command(name="voters", description="Show who is eligible to vote and how the count is derived")
+        async def council_voters(interaction: discord.Interaction):
+            if not is_council(interaction.user):
+                return await interaction.response.send_message("❌ Council/owners only.", ephemeral=True)
+            await interaction.response.defer(ephemeral=True)
+
+            guild = interaction.guild
+            if not guild.chunked:
+                try:
+                    await guild.chunk()
+                except Exception:
+                    pass
+
+            council_role = guild.get_role(config.COUNCIL_ROLE_ID)
+            owner_role = guild.get_role(config.OWNER_ROLE_ID)
+            council_members = list(council_role.members) if council_role else []
+            owner_members = list(owner_role.members) if owner_role else []
+
+            # Build the deduplicated, alt-collapsed voter set with provenance.
+            raw = {}  # primary_id -> set of source account ids
+            for m in council_members:
+                raw.setdefault(primary_of(m.id), set()).add(m.id)
+            for m in owner_members:
+                raw.setdefault(primary_of(m.id), set()).add(m.id)
+
+            lines = []
+            for prim, sources in raw.items():
+                # Note any source account that isn't the primary (an alt folding in).
+                alts = [s for s in sources if str(s) != str(prim)]
+                tag = ""
+                if alts:
+                    tag = " (via alt " + ", ".join(f"<@{a}>" for a in alts) + ")"
+                # Flag the case where the primary itself isn't a role-holder
+                prim_has_role = any(str(m.id) == str(prim) for m in council_members + owner_members)
+                if not prim_has_role:
+                    tag += " ⚠️ primary has no council/owner role"
+                bot_flag = " 🤖 BOT" if any(_member_is_bot(guild, s) for s in sources) else ""
+                lines.append(f"• <@{prim}>{tag}{bot_flag}")
+
+            eligible = len(raw)
+            embed = discord.Embed(
+                title="🗳️ Eligible Voters",
+                description="\n".join(sorted(lines)) or "No eligible voters found.",
+                color=discord.Color.blurple(),
+            )
+            embed.add_field(name="Council role members", value=str(len(council_members)), inline=True)
+            embed.add_field(name="Owner role members", value=str(len(owner_members)), inline=True)
+            embed.add_field(name="Eligible (deduped)", value=f"**{eligible}**", inline=True)
+            embed.set_footer(text="Eligible = council ∪ owners, alts collapsed to their primary.")
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def _create_vote(self, interaction, kind, title, description, target, voting_period):
         guild = interaction.guild
