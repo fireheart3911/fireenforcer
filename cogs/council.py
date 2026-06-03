@@ -340,11 +340,11 @@ class VoteView(discord.ui.View):
     async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._cast(interaction, "no")
 
-    @discord.ui.button(label="Abstain", style=discord.ButtonStyle.blurple, emoji="➖", custom_id="cv:abstain")
+    @discord.ui.button(label="Abstain", style=discord.ButtonStyle.gray, emoji="➖", custom_id="cv:abstain")
     async def abstain(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._cast(interaction, "abstain")
 
-    @discord.ui.button(label="Recuse", style=discord.ButtonStyle.blurple, emoji="⭕", custom_id="cv:recuse")
+    @discord.ui.button(label="Recuse", style=discord.ButtonStyle.gray, emoji="⭕", custom_id="cv:recuse")
     async def recuse(self, interaction: discord.Interaction, button: discord.ui.Button):
         vote = _find_vote_by_thread(interaction.channel_id)
         if not vote:
