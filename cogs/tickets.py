@@ -120,7 +120,7 @@ async def close_ticket(client: commands.Bot, thread: discord.Thread, ticket_id: 
         elif closed_by_id:
             embed.add_field(name="📤 Closed by", value=f"<@{closed_by_id}>", inline=True)
         if data.get("claimed_by"):
-            embed.add_field(name="🔖 Claimed by", value=f"<@{data['claimed_by']}>", inline=True)
+            embed.add_field(name="👤 Claimed by", value=f"<@{data['claimed_by']}>", inline=True)
         embed.add_field(name="🕓 Open Time", value=f"<t:{int(float(data['timestamp']))}:R>", inline=True)
         embed.add_field(name="📑 Topic", value=data.get("reason", "—"), inline=True)
         embed.add_field(name="🛠️ Category", value=cat_label, inline=True)
@@ -272,9 +272,9 @@ async def _update_ticket_embed(client: commands.Bot, thread: discord.Thread, dat
     new = discord.Embed(title=embed.title, description=embed.description, color=embed.color)
     new.add_field(name="Reason", value=data.get("reason", "—"), inline=False)
     if data.get("claimed_by"):
-        new.add_field(name="🔖 Claimed by", value=f"<@{data['claimed_by']}>", inline=False)
+        new.add_field(name="👤 Claimed by", value=f"<@{data['claimed_by']}>", inline=False)
     else:
-        new.add_field(name="🔖 Status", value="Unclaimed", inline=False)
+        new.add_field(name="👤 Status", value="Unclaimed", inline=False)
     try:
         await msg.edit(embed=new)
     except discord.HTTPException:
@@ -285,7 +285,7 @@ class TicketControlView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Claim", style=discord.ButtonStyle.primary, emoji="🔖", custom_id="tickets:claim")
+    @discord.ui.button(label="Claim", style=discord.ButtonStyle.primary, emoji="👤", custom_id="tickets:claim")
     async def claim(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not isinstance(interaction.channel, discord.Thread):
             return await interaction.response.send_message("Use this inside a ticket thread.", ephemeral=True)
