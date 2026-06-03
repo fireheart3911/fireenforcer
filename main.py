@@ -13,7 +13,10 @@ from config import (
     GUILD_ID, GUILD_LIST, TICKET_LOG_CHANNEL_ID, STATUS_CHANNEL_ID,
     STATUS_LOG_CHANNEL_ID, ELO_LOG_CHANNEL_ID, HEARTBEAT_URL,
 )
-from cogs.tickets import TicketView, CloseView, setup as setup_tickets
+from cogs.tickets import (
+    TicketView, TicketControlView, CloseRequestView, close_ticket,
+    setup as setup_tickets,
+)
 from cogs.status import StatusView, setup_status_message, setup as setup_status
 from cogs.elo import EloSessionView, setup as setup_elo
 from cogs.council import (
@@ -35,7 +38,8 @@ class BotClient(commands.Bot):
     async def setup_hook(self) -> None:
         # Register persistent views so buttons survive restarts
         self.add_view(TicketView())
-        self.add_view(CloseView())
+        self.add_view(TicketControlView())
+        self.add_view(CloseRequestView())
         self.add_view(StatusView())
         self.add_view(CommentView())
         self.add_view(VoteView())
@@ -57,6 +61,7 @@ class BotClient(commands.Bot):
         )
         self._council_cog = await setup_council(self)
 
+        # Sync slash commands
         for guild_obj in GUILD_LIST:
             try:
                 synced = await self.tree.sync(guild=guild_obj)
@@ -75,6 +80,7 @@ class BotClient(commands.Bot):
         store.load_data()
         await setup_status_message(self, STATUS_CHANNEL_ID.id)
 
+        # Start task loops
         for loop in (
             self._status_cog.cleanup_expired_statuses,
             self._elo_cog.cleanup_old_sessions,
@@ -100,26 +106,12 @@ class BotClient(commands.Bot):
         for tid, data in to_close:
             thread = self.get_channel(int(data["thread_id"]))
             if thread and isinstance(thread, discord.Thread):
-                await thread.send(f"🔒 Ticket auto-closed. Reason: {data.get('autoclose_reason', 'No reason provided.')}")
-                await thread.edit(archived=True, locked=True)
-
-                log_channel = self.get_channel(TICKET_LOG_CHANNEL_ID.id)
-                if log_channel:
-                    embed = discord.Embed(
-                        title="Ticket Auto-Closed",
-                        description=f"Ticket Thread: {thread.mention}",
-                        color=discord.Color.orange(),
-                        timestamp=datetime.datetime.now(),
-                    )
-                    embed.add_field(name="#️⃣ Ticket ID", value=tid, inline=True)
-                    embed.add_field(name="📥 Opened by", value=f"<@{data['user_id']}>", inline=True)
-                    embed.add_field(name="🕓 Auto Close", value=f"<t:{int(float(data['autoclose_at']))}:R>", inline=True)
-                    embed.add_field(name="📑 Topic", value=data["reason"], inline=True)
-                    embed.add_field(name="🛠️ Category", value=data["ticket_type"], inline=True)
-                    await log_channel.send(embed=embed)
-
-            del store.storage["tickets"][tid]
-            store.save_data()
+                await close_ticket(self, thread, tid, closed_by_id=None,
+                                   reason=data.get("autoclose_reason"), auto=True)
+            else:
+                # Thread is gone; just drop the orphaned record.
+                del store.storage["tickets"][tid]
+                store.save_data()
 
     @tasks.loop(seconds=60)
     async def heartbeat(self):
@@ -156,7 +148,6 @@ class BotClient(commands.Bot):
     @commands.is_owner()
     async def prepare(self, ctx: commands.Context):
         await ctx.send("Setup: TicketView", view=TicketView())
-        await ctx.send("Setup: CloseView", view=CloseView())
 
 client = BotClient(command_prefix="!", intents=intents)
 
