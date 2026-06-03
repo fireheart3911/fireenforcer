@@ -120,7 +120,7 @@ async def close_ticket(client: commands.Bot, thread: discord.Thread, ticket_id: 
         elif closed_by_id:
             embed.add_field(name="📤 Closed by", value=f"<@{closed_by_id}>", inline=True)
         if data.get("claimed_by"):
-            embed.add_field(name="🙋 Claimed by", value=f"<@{data['claimed_by']}>", inline=True)
+            embed.add_field(name="🔖 Claimed by", value=f"<@{data['claimed_by']}>", inline=True)
         embed.add_field(name="🕓 Open Time", value=f"<t:{int(float(data['timestamp']))}:R>", inline=True)
         embed.add_field(name="📑 Topic", value=data.get("reason", "—"), inline=True)
         embed.add_field(name="🛠️ Category", value=cat_label, inline=True)
@@ -236,7 +236,7 @@ class TicketControlView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Claim", style=discord.ButtonStyle.primary, emoji="🙋", custom_id="tickets:claim")
+    @discord.ui.button(label="Claim", style=discord.ButtonStyle.primary, emoji="🔖", custom_id="tickets:claim")
     async def claim(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not isinstance(interaction.channel, discord.Thread):
             return await interaction.response.send_message("Use this inside a ticket thread.", ephemeral=True)
@@ -259,7 +259,7 @@ class TicketControlView(discord.ui.View):
 
         data["claimed_by"] = str(interaction.user.id)
         store.save_data()
-        await interaction.channel.send(f"🙋 {interaction.user.mention} claimed this ticket.")
+        await interaction.channel.send(f"🔖 {interaction.user.mention} claimed this ticket.")
         await interaction.response.send_message("✅ You claimed this ticket.", ephemeral=True)
 
     @discord.ui.button(label="Close", style=discord.ButtonStyle.red, emoji="🔒", custom_id="tickets:close")
