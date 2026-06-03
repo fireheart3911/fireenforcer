@@ -245,10 +245,10 @@ def build_vote_embed(guild: discord.Guild, vote: dict) -> discord.Embed:
             embed.add_field(name="Participation", value=f"{voted}/{eligible} have voted{extra}", inline=False)
         else:
             need = vl.required_yes(vote["mode"], eligible)
-            recused_line = f"\nRecused: {recused}" if recused else ""
+            recused_line = f" · Recused: {recused}" if recused else ""
             embed.add_field(
                 name="Tally",
-                value=f"✅ Approve: **{yes}**  ·  ❌ Oppose: **{no}**  ·  ➖ Abstain: **{abstain}**\n"
+                value=f"✅ Approve: **{yes}**  ·  ❌ Oppose: **{no}**  ·  ➖ Abstain: **{abstain}**\n\n"
                       f"Eligible: {eligible} · Needed to pass: {need}{recused_line}",
                 inline=False,
             )
@@ -258,7 +258,7 @@ def build_vote_embed(guild: discord.Guild, vote: dict) -> discord.Embed:
                     icon = {"yes": "✅", "no": "❌", "abstain": "➖"}[choice]
                     lines.append(f"{icon} <@{uid}>")
                 for uid in vote.get("recused", []):
-                    lines.append(f"🚪 <@{uid}> (recused)")
+                    lines.append(f"⭕ <@{uid}> (recused)")
                 if lines:
                     embed.add_field(name="Voters", value="\n".join(lines), inline=False)
 
@@ -340,11 +340,11 @@ class VoteView(discord.ui.View):
     async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._cast(interaction, "no")
 
-    @discord.ui.button(label="Abstain", style=discord.ButtonStyle.gray, emoji="➖", custom_id="cv:abstain")
+    @discord.ui.button(label="Abstain", style=discord.ButtonStyle.blurple, emoji="➖", custom_id="cv:abstain")
     async def abstain(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._cast(interaction, "abstain")
 
-    @discord.ui.button(label="Recuse", style=discord.ButtonStyle.gray, emoji="🚪", custom_id="cv:recuse")
+    @discord.ui.button(label="Recuse", style=discord.ButtonStyle.blurple, emoji="⭕", custom_id="cv:recuse")
     async def recuse(self, interaction: discord.Interaction, button: discord.ui.Button):
         vote = _find_vote_by_thread(interaction.channel_id)
         if not vote:
@@ -368,7 +368,7 @@ class VoteView(discord.ui.View):
             recused.append(voter)
             # Recusing removes any cast vote.
             vote["votes"].pop(voter, None)
-            msg = "🚪 You have recused yourself from this vote."
+            msg = "⭕ You have recused yourself from this vote."
         store.save_data()
         await _refresh_vote_message(interaction.client, vote)
 
