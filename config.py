@@ -161,7 +161,7 @@ if module_enabled("council"):
     MEMBER_GLOBAL_LEVEL = _opt_int("MEMBER_GLOBAL_LEVEL", 50)
     VIP_GLOBAL_LEVEL    = _opt_int("VIP_GLOBAL_LEVEL", 150)
     SERVER_LEVEL_RATIO  = float(_opt_str("SERVER_LEVEL_RATIO", "0.85"))
-    XP_API_BASE  = _opt_str("XP_API_BASE", "https://wireless-charger.redi.sh/api")
+    XP_API_BASE  = _opt_str("XP_API_BASE")
     XP_API_TOKEN = _opt_str("XP_API_TOKEN")
 else:
     VOTE_CHANNEL_ID = OWNER_CHANNEL_ID = COUNCIL_LOG_CHANNEL_ID = None
