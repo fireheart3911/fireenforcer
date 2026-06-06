@@ -9,49 +9,50 @@ import config
 
 
 # ---------------------------------------------------------------------------
-# Categories
+# Categories (driven by config.json → config.TICKET_CATEGORIES)
 # ---------------------------------------------------------------------------
-# Hardcoded but defined as a table so labels/emojis/colours/roles/descriptions
-# are easy to tweak in one place. `role_attr` names the config attribute that
-# holds the role pinged on creation (and allowed to claim / closerequest).
+# config.TICKET_CATEGORIES is {key: {label, emoji, style, role_id, description}}.
 
-TICKET_CATEGORIES = {
-    "admin": {
-        "label": "Admin",
-        "emoji": "🛠️",
-        "style": discord.ButtonStyle.danger,
-        "color": discord.Color.red(),
-        "role_attr": "ADMINISTRATION_ROLE_ID",
-        "description": (
-            "Sensitive issues, problems with council members, other critical topics."
-        ),
-    },
-    "council": {
-        "label": "Council",
-        "emoji": "⚖️",
-        "style": discord.ButtonStyle.primary,
-        "color": discord.Color.blurple(),
-        "role_attr": "COUNCIL_ROLE_ID",
-        "description": (
-            "Moderation issues, structural suggestions or similar topics."
-        ),
-    },
-    "support": {
-        "label": "Support",
-        "emoji": "🛂",
-        "style": discord.ButtonStyle.success,
-        "color": discord.Color.blurple(),
-        "role_attr": "SUPPORT_ROLE_ID",
-        "description": (
-            "General help, leaderboard submissions, anything else"
-        ),
-    },
+_STYLE_MAP = {
+    "primary": discord.ButtonStyle.primary,
+    "secondary": discord.ButtonStyle.secondary,
+    "success": discord.ButtonStyle.success,
+    "danger": discord.ButtonStyle.danger,
+    "blurple": discord.ButtonStyle.primary,
+    "grey": discord.ButtonStyle.secondary,
+    "gray": discord.ButtonStyle.secondary,
+    "green": discord.ButtonStyle.success,
+    "red": discord.ButtonStyle.danger,
+}
+
+_COLOR_MAP = {
+    "primary": discord.Color.blurple(),
+    "blurple": discord.Color.blurple(),
+    "secondary": discord.Color.greyple(),
+    "grey": discord.Color.greyple(),
+    "gray": discord.Color.greyple(),
+    "success": discord.Color.green(),
+    "green": discord.Color.green(),
+    "danger": discord.Color.red(),
+    "red": discord.Color.red(),
 }
 
 
+def _categories() -> dict:
+    return config.TICKET_CATEGORIES
+
+
+def _cat_style(cat: dict) -> discord.ButtonStyle:
+    return _STYLE_MAP.get(cat.get("style", "secondary"), discord.ButtonStyle.secondary)
+
+
+def _cat_color(cat: dict) -> discord.Color:
+    return _COLOR_MAP.get(cat.get("style", "secondary"), discord.Color.greyple())
+
+
 def _category_role_id(cat_key: str):
-    spec = TICKET_CATEGORIES[cat_key]
-    return getattr(config, spec["role_attr"], None)
+    cat = _categories().get(cat_key)
+    return cat.get("role_id") if cat else None
 
 
 def _panel_embed() -> discord.Embed:
@@ -61,12 +62,13 @@ def _panel_embed() -> discord.Embed:
                     "A private thread will be created for you.",
         color=discord.Color.blurple(),
     )
-    for spec in TICKET_CATEGORIES.values():
+    for cat in _categories().values():
         embed.add_field(
-            name=f"{spec['emoji']} {spec['label']}",
-            value=spec["description"],
+            name=f"{cat.get('emoji', '')} {cat['label']}".strip(),
+            value=cat.get("description", ""),
             inline=False,
         )
+    return embed
     return embed
 
 
@@ -106,7 +108,7 @@ async def close_ticket(client: commands.Bot, thread: discord.Thread, ticket_id: 
     log_channel = client.get_channel(config.TICKET_LOG_CHANNEL_ID.id)
     if log_channel and data:
         cat = data.get("ticket_type", "?")
-        cat_label = TICKET_CATEGORIES.get(cat, {}).get("label", cat)
+        cat_label = _categories().get(cat, {}).get("label", cat)
         embed = discord.Embed(
             title="Ticket Auto-Closed" if auto else "Ticket Closed",
             description=f"Ticket Thread: {thread.mention}",
@@ -120,7 +122,7 @@ async def close_ticket(client: commands.Bot, thread: discord.Thread, ticket_id: 
         elif closed_by_id:
             embed.add_field(name="📤 Closed by", value=f"<@{closed_by_id}>", inline=True)
         if data.get("claimed_by"):
-            embed.add_field(name="👤 Claimed by", value=f"<@{data['claimed_by']}>", inline=True)
+            embed.add_field(name="🙋 Claimed by", value=f"<@{data['claimed_by']}>", inline=True)
         embed.add_field(name="🕓 Open Time", value=f"<t:{int(float(data['timestamp']))}:R>", inline=True)
         embed.add_field(name="📑 Topic", value=data.get("reason", "—"), inline=True)
         embed.add_field(name="🛠️ Category", value=cat_label, inline=True)
@@ -135,7 +137,7 @@ async def close_ticket(client: commands.Bot, thread: discord.Thread, ticket_id: 
     if data:
         try:
             owner = await client.fetch_user(int(data["user_id"]))
-            cat_label = TICKET_CATEGORIES.get(data.get("ticket_type"), {}).get("label", data.get("ticket_type", "?"))
+            cat_label = _categories().get(data.get("ticket_type"), {}).get("label", data.get("ticket_type", "?"))
             dm = discord.Embed(
                 title="Your ticket was closed",
                 description=(f"Your **{cat_label}** ticket (#{ticket_id}) has been closed."
@@ -149,7 +151,6 @@ async def close_ticket(client: commands.Bot, thread: discord.Thread, ticket_id: 
             dm.set_footer(text="If you still need help, feel free to open a new ticket.")
             await owner.send(embed=dm)
         except (discord.Forbidden, discord.HTTPException):
-            print("\033[93m[Tickets] Failed to DM owner of ticket #{ticket_id}.\033[0m")
             pass  # DMs disabled or user unreachable — not fatal
 
     # --- archive + drop record ---
@@ -182,28 +183,39 @@ def _ticket_from_thread(thread: discord.Thread) -> tuple[str | None, dict | None
 # Panel view
 # ---------------------------------------------------------------------------
 
+class TicketOpenButton(discord.ui.Button):
+    def __init__(self, cat_key: str, cat: dict):
+        super().__init__(
+            label=cat["label"],
+            style=_cat_style(cat),
+            emoji=cat.get("emoji") or None,
+            custom_id=f"tickets:open:{cat_key}",
+        )
+        self.cat_key = cat_key
+
+    async def callback(self, interaction: discord.Interaction):
+        await create_ticket(interaction, self.cat_key)
+
+
 class TicketView(discord.ui.View):
+    """Panel view — one button per configured category.
+
+    Buttons use stable custom_ids (tickets:open:<key>) so the view is
+    persistent and survives restarts. The set of categories is read from config.
+    """
     def __init__(self):
         super().__init__(timeout=None)
-
-    @discord.ui.button(label="Admin", style=discord.ButtonStyle.danger, emoji="🛠️", custom_id="tickets:admin")
-    async def admin_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await create_ticket(interaction, "admin")
-
-    @discord.ui.button(label="Council", style=discord.ButtonStyle.primary, emoji="⚖️", custom_id="tickets:council")
-    async def council_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await create_ticket(interaction, "council")
-
-    @discord.ui.button(label="Support", style=discord.ButtonStyle.success, emoji="🛂", custom_id="tickets:support")
-    async def support_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await create_ticket(interaction, "support")
+        for key, cat in _categories().items():
+            self.add_item(TicketOpenButton(key, cat))
 
 
 async def create_ticket(interaction: discord.Interaction, cat_key: str):
-    spec = TICKET_CATEGORIES[cat_key]
-    role_id = _category_role_id(cat_key)
+    cat = _categories().get(cat_key)
+    if not cat:
+        return await interaction.response.send_message("❌ Unknown ticket category.", ephemeral=True)
+    role_id = cat.get("role_id")
 
-    modal = discord.ui.Modal(title=f"{spec['label']} Ticket")
+    modal = discord.ui.Modal(title=f"{cat['label']} Ticket")
     reason_input = discord.ui.TextInput(
         label="Reason for opening the ticket",
         style=discord.TextStyle.paragraph,
@@ -221,10 +233,10 @@ async def create_ticket(interaction: discord.Interaction, cat_key: str):
             reason="New ticket",
         )
         embed = discord.Embed(
-            title=f"{spec['emoji']} {spec['label']} Ticket Opened",
-            description=f"Hello {interaction.user.mention}, thanks for opening a **{spec['label']}** ticket!\n"
+            title=f"{cat.get('emoji', '')} {cat['label']} Ticket Opened".strip(),
+            description=f"Hello {interaction.user.mention}, thanks for opening a **{cat['label']}** ticket!\n"
                         f"A member of the team will be with you shortly.",
-            color=spec["color"],
+            color=_cat_color(cat),
         )
         embed.add_field(name="Reason", value=reason_input.value, inline=False)
 
@@ -266,15 +278,15 @@ async def _update_ticket_embed(client: commands.Bot, thread: discord.Thread, dat
     if not msg.embeds:
         return
 
-    spec = TICKET_CATEGORIES.get(data.get("ticket_type"), {})
+    spec = _categories().get(data.get("ticket_type"), {})
     embed = msg.embeds[0]
     # Rebuild fields: keep Reason, set/replace the Claimed field.
     new = discord.Embed(title=embed.title, description=embed.description, color=embed.color)
     new.add_field(name="Reason", value=data.get("reason", "—"), inline=False)
     if data.get("claimed_by"):
-        new.add_field(name="👤 Claimed by", value=f"<@{data['claimed_by']}>", inline=False)
+        new.add_field(name="🙋 Claimed by", value=f"<@{data['claimed_by']}>", inline=False)
     else:
-        new.add_field(name="👤 Status", value="Unclaimed", inline=False)
+        new.add_field(name="🙋 Status", value="Unclaimed", inline=False)
     try:
         await msg.edit(embed=new)
     except discord.HTTPException:
@@ -285,7 +297,7 @@ class TicketControlView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Claim", style=discord.ButtonStyle.primary, emoji="👤", custom_id="tickets:claim")
+    @discord.ui.button(label="Claim", style=discord.ButtonStyle.primary, emoji="🙋", custom_id="tickets:claim")
     async def claim(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not isinstance(interaction.channel, discord.Thread):
             return await interaction.response.send_message("Use this inside a ticket thread.", ephemeral=True)
