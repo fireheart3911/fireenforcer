@@ -18,9 +18,9 @@ from fractions import Fraction
 
 THRESHOLD_MODES = {
     "normal":         {"label": "Normal (51%)",                "kind": "majority",   "no_oppose": False},
-    "two_thirds":     {"label": "Two Thirds (67%)",                       "kind": "two_thirds", "no_oppose": False},
-    "unanimous":      {"label": "Unanimous (67%, no oppose)",    "kind": "two_thirds", "no_oppose": True},
-    "true_unanimous": {"label": "True Unanimous (100%)",            "kind": "all",        "no_oppose": False},
+    "two_thirds":     {"label": "Two Thirds (67%)",            "kind": "two_thirds", "no_oppose": False},
+    "unanimous":      {"label": "Unanimous (67%, no oppose)",  "kind": "two_thirds", "no_oppose": True},
+    "true_unanimous": {"label": "True Unanimous (100%)",       "kind": "all",        "no_oppose": False},
 }
 
 DEFAULT_MODE = "normal"

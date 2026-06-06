@@ -220,4 +220,6 @@ __marimo__/
 # Custom
 archive/
 requirements.txt
+config.json
 data.json
+status.txt
