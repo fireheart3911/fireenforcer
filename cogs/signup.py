@@ -122,6 +122,39 @@ class SignupModal(discord.ui.Modal):
         await interaction.response.send_message(response + "!", ephemeral=True)
 
 
+class FlavorModal(discord.ui.Modal, title="Edit Signup Panel"):
+    """Edit the signup title + description. The description is a paragraph field,
+    so it supports real newlines and Discord markdown (**bold**, *italics*,
+    bullet points, links, etc.), which render in the embed."""
+    def __init__(self, bot: commands.Bot):
+        super().__init__()
+        self.bot = bot
+        sd = _signup_data()
+        self.title_input = discord.ui.TextInput(
+            label="Title",
+            style=discord.TextStyle.short,
+            default=sd.get("title", "Sign Up"),
+            required=True, max_length=256,
+        )
+        self.description_input = discord.ui.TextInput(
+            label="Description (supports newlines & markdown)",
+            style=discord.TextStyle.paragraph,
+            default=sd.get("description", "Click the button below to register!"),
+            placeholder="Use line breaks, **bold**, *italics*, bullet points…",
+            required=True, max_length=4000,
+        )
+        self.add_item(self.title_input)
+        self.add_item(self.description_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        sd = _signup_data()
+        sd["title"] = self.title_input.value
+        sd["description"] = self.description_input.value
+        store.save_data()
+        await update_signup_embed(self.bot)
+        await interaction.response.send_message("✅ Signup panel updated.", ephemeral=True)
+
+
 async def update_signup_embed(client: commands.Bot):
     sd = _signup_data()
     if not sd.get("message_id") or not sd.get("channel_id"):
@@ -191,28 +224,10 @@ class SignupCog(commands.Cog):
             await interaction.response.send_message(
                 f"Team signups are now **{'enabled' if enabled else 'disabled'}**", ephemeral=True)
 
-        @group.command(name="flavor", description="Update the signup panel title and description")
-        @app_commands.describe(title="The title of the signup embed (optional)",
-                               description="The description of the signup embed (optional)")
+        @group.command(name="flavor", description="Edit the signup panel title and description (with formatting)")
         @app_commands.checks.has_permissions(administrator=True)
-        async def signup_flavor(interaction: discord.Interaction, title: str = None, description: str = None):
-            sd = _signup_data()
-            if title is None and description is None:
-                return await interaction.response.send_message(
-                    f"**Current Signup Flavor:**\n• Title: `{sd.get('title')}`\n• Description: `{sd.get('description')}`",
-                    ephemeral=True)
-            if title is not None:
-                sd["title"] = title
-            if description is not None:
-                sd["description"] = description
-            store.save_data()
-            await update_signup_embed(self.bot)
-            resp = "Signup flavor updated!"
-            if title is not None:
-                resp += f"\n• Title: `{title}`"
-            if description is not None:
-                resp += f"\n• Description: `{description}`"
-            await interaction.response.send_message(resp, ephemeral=True)
+        async def signup_flavor(interaction: discord.Interaction):
+            await interaction.response.send_modal(FlavorModal(self.bot))
 
         @group.command(name="reset", description="Move all signed-up users to a new role and remove signup role")
         @app_commands.describe(new_role="Optional role to grant users (leave empty to just remove signup role)")
