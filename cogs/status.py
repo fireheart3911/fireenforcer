@@ -70,105 +70,22 @@ AWAY_TYPES = [
 ]
 AWAY_LOOKUP = {key: (emoji, label) for key, emoji, label in AWAY_TYPES}
 
-_DURATION_RE = re.compile(r"(\d+)\s*([dhm])")
-
 
 # ---------------------------------------------------------------------------
-# Parse helpers
+# Parse helpers (shared module)
 # ---------------------------------------------------------------------------
 
-def parse_away_duration(text: str, tz=None) -> datetime.datetime | None:
-    """Parse an away time. Returns a future datetime, or None for indefinite.
-
-    Accepts:
-      - "" / "indefinite" / "none" / "-"  → None (no set return)
-      - duration combos: "30m", "2h", "2h30m", "1d6h"  (timezone-independent)
-      - absolute clock time: "14:30" — interpreted in `tz` (the user's zone)
-    Raises ValueError on anything else.
-    """
-    text = text.strip().lower()
-    if not text or text in ("indefinite", "none", "-"):
-        return None
-
-    # Absolute HH:MM (only if there are no duration units present)
-    if ":" in text and not _DURATION_RE.search(text):
-        try:
-            hour, minute = map(int, text.split(":"))
-        except ValueError:
-            raise ValueError("Invalid clock time. Use HH:MM, e.g. 14:30")
-        now_tz = datetime.datetime.now(tz)  # aware if tz given
-        return_time = now_tz.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if return_time <= now_tz:
-            return_time += datetime.timedelta(days=1)
-        return return_time
-
-    # Duration combo — zone-independent, relative to now
-    matches = _DURATION_RE.findall(text)
-    consumed = "".join(f"{n}{u}" for n, u in matches)
-    if not matches or consumed != re.sub(r"\s+", "", text):
-        raise ValueError("Invalid format. Use 30m, 2h, 2h30m, 1d6h, or 14:30")
-
-    delta = datetime.timedelta()
-    for num, unit in matches:
-        num = int(num)
-        delta += datetime.timedelta(days=num) if unit == "d" else \
-                 datetime.timedelta(hours=num) if unit == "h" else \
-                 datetime.timedelta(minutes=num)
-    return datetime.datetime.now() + delta
-
-
-def parse_play_start(text: str, tz=None) -> datetime.datetime:
-    """Parse a 'playing since' time for in-game status (counts UP).
-
-    Accepts:
-      - "" → now (just started)
-      - duration combos: "30m", "2h30m" → that long ago  (timezone-independent)
-      - absolute clock time: "14:30" → today in `tz` (or yesterday if future)
-    Raises ValueError on anything else.
-    """
-    text = text.strip().lower()
-    if not text:
-        return datetime.datetime.now()
-
-    if ":" in text and not _DURATION_RE.search(text):
-        try:
-            hour, minute = map(int, text.split(":"))
-        except ValueError:
-            raise ValueError("Invalid clock time. Use HH:MM, e.g. 14:30")
-        now_tz = datetime.datetime.now(tz)
-        start = now_tz.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if start > now_tz:
-            start -= datetime.timedelta(days=1)
-        return start
-
-    matches = _DURATION_RE.findall(text)
-    consumed = "".join(f"{n}{u}" for n, u in matches)
-    if not matches or consumed != re.sub(r"\s+", "", text):
-        raise ValueError("Invalid format. Leave blank for now, or use 30m, 2h30m, 14:30")
-
-    delta = datetime.timedelta()
-    for num, unit in matches:
-        num = int(num)
-        delta += datetime.timedelta(days=num) if unit == "d" else \
-                 datetime.timedelta(hours=num) if unit == "h" else \
-                 datetime.timedelta(minutes=num)
-    return datetime.datetime.now() - delta
+from cogs.parsers import parse_away_duration, parse_play_start
 
 
 def parse_vacation_datetime(text: str) -> datetime.datetime:
-    """Parse 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' as a naive local datetime.
+    """Parse 'dd-mm-yyyy' or 'dd-mm-yyyy hh:mm' as a naive local datetime.
 
     Timezone is intentionally NOT applied here — dates are interpreted in the
-    host's local time. The vacation 'timezone' field is purely informational
-    (where the person will be / how reachable), shown on the board.
+    host's local time. The vacation 'timezone' field is purely informational.
     """
-    text = text.strip()
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
-        try:
-            return datetime.datetime.strptime(text, fmt)
-        except ValueError:
-            continue
-    raise ValueError(f"Invalid date '{text}'. Use `YYYY-MM-DD` or `YYYY-MM-DD HH:MM`.")
+    from cogs.parsers import parse_eu_datetime
+    return parse_eu_datetime(text)  # naive (no tz)
 
 
 _TZ_ABBR = {
@@ -619,11 +536,11 @@ class VacationModal(discord.ui.Modal):
         super().__init__(title="Schedule a Vacation")
         self.owner_view = owner_view
         self.start_input = discord.ui.TextInput(
-            label="Start", placeholder="YYYY-MM-DD or YYYY-MM-DD HH:MM",
+            label="Start", placeholder="dd-mm-yyyy or dd-mm-yyyy hh:mm",
             required=True, max_length=16,
         )
         self.end_input = discord.ui.TextInput(
-            label="End", placeholder="YYYY-MM-DD or YYYY-MM-DD HH:MM",
+            label="End", placeholder="dd-mm-yyyy or dd-mm-yyyy hh:mm",
             required=True, max_length=16,
         )
         self.destination_input = discord.ui.TextInput(

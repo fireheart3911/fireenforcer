@@ -49,7 +49,7 @@ def _opt_str(name: str, default=None):
 
 _DEFAULT_CONFIG = {
     # Fallback
-    "modules": ["tickets", "status", "elo", "council"],
+    "modules": ["tickets"],
     "prefix": "sudo",
     "presence": {"mode": "fixed", "text": "🛰️ Running v1.4.8"},
     "ticket_categories": [
@@ -146,6 +146,15 @@ else:
 
 
 # ---------------------------------------------------------------------------
+# Shared: XP API (used by council promotions and signup application mode)
+# ---------------------------------------------------------------------------
+# Optional regardless of module — features that need it degrade gracefully when
+# the token is absent rather than failing at config load.
+XP_API_BASE  = _opt_str("XP_API_BASE")
+XP_API_TOKEN = _opt_str("XP_API_TOKEN")
+
+
+# ---------------------------------------------------------------------------
 # Council module
 # ---------------------------------------------------------------------------
 
@@ -161,14 +170,11 @@ if module_enabled("council"):
     MEMBER_GLOBAL_LEVEL = _opt_int("MEMBER_GLOBAL_LEVEL", 50)
     VIP_GLOBAL_LEVEL    = _opt_int("VIP_GLOBAL_LEVEL", 150)
     SERVER_LEVEL_RATIO  = float(_opt_str("SERVER_LEVEL_RATIO", "0.85"))
-    XP_API_BASE  = _opt_str("XP_API_BASE", "https://wireless-charger.redi.sh/api")
-    XP_API_TOKEN = _opt_str("XP_API_TOKEN")
 else:
     VOTE_CHANNEL_ID = OWNER_CHANNEL_ID = COUNCIL_LOG_CHANNEL_ID = None
     GUEST_ROLE_ID = MEMBER_ROLE_ID = VIP_ROLE_ID = COUNCIL_ROLE_ID = OWNER_ROLE_ID = None
     MEMBER_GLOBAL_LEVEL = VIP_GLOBAL_LEVEL = None
     SERVER_LEVEL_RATIO = None
-    XP_API_BASE = XP_API_TOKEN = None
 
 
 # ---------------------------------------------------------------------------
@@ -178,5 +184,7 @@ else:
 if module_enabled("signup"):
     SIGNUP_ROLE_ID        = _req_int("SIGNUP_ROLE_ID")
     SIGNUP_LOG_CHANNEL_ID = _req_int("SIGNUP_LOG_CHANNEL_ID")
+    # Channel applications are posted to (only needed if you use application mode).
+    SIGNUP_APPLICATION_CHANNEL_ID = _opt_int("SIGNUP_APPLICATION_CHANNEL_ID")
 else:
-    SIGNUP_ROLE_ID = SIGNUP_LOG_CHANNEL_ID = None
+    SIGNUP_ROLE_ID = SIGNUP_LOG_CHANNEL_ID = SIGNUP_APPLICATION_CHANNEL_ID = None

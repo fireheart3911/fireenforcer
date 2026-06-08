@@ -20,7 +20,7 @@ from cogs.tickets import (
 from cogs.status import StatusView, setup_status_message, setup as setup_status
 from cogs.elo import EloSessionView, setup as setup_elo
 from cogs.council import CommentView, VoteView, VetoView, QuashView, setup as setup_council
-from cogs.signup import SignupView, setup as setup_signup
+from cogs.signup import SignupView, ApplicationView, setup as setup_signup
 
 
 # ---------------------------------------------------------------------------
@@ -52,9 +52,10 @@ class BotClient(commands.Bot):
             self.add_view(QuashView())
         if enabled("signup"):
             self.add_view(SignupView())
+            self.add_view(ApplicationView())
 
         # --- load cogs ---
-        self._status_cog = self._elo_cog = self._council_cog = None
+        self._status_cog = self._elo_cog = self._council_cog = self._signup_cog = None
 
         if enabled("tickets"):
             await setup_tickets(self)
@@ -72,7 +73,7 @@ class BotClient(commands.Bot):
         if enabled("council"):
             self._council_cog = await setup_council(self)
         if enabled("signup"):
-            await setup_signup(self)
+            self._signup_cog = await setup_signup(self)
 
         # --- sync slash commands once (here, not in on_ready) ---
         for guild_obj in config.GUILD_LIST:
@@ -100,6 +101,8 @@ class BotClient(commands.Bot):
             loops.append(self._elo_cog.cleanup_old_sessions)
         if self._council_cog:
             loops.append(self._council_cog.tick)
+        if self._signup_cog:
+            loops.append(self._signup_cog.schedule_tick)
         if config.module_enabled("tickets"):
             loops.append(self.autoclose_tickets)
         for loop in loops:
