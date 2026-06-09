@@ -47,6 +47,7 @@ def _sd() -> dict:
     sd.setdefault("close_at", None)
     sd.setdefault("participants", {})
     sd.setdefault("applications", {})
+    sd.setdefault("denied", [])
     return sd
 
 
@@ -259,6 +260,10 @@ class SignupView(discord.ui.View):
         uid = str(interaction.user.id)
         if uid in sd["participants"]:
             return await interaction.response.send_message("❌ You have already signed up!", ephemeral=True)
+        if uid in sd.get("denied", []):
+            return await interaction.response.send_message(
+                "❌ Your registration for this event was declined. You can apply again at the next event.",
+                ephemeral=True)
         if any(a["user_id"] == uid and a["status"] == "pending" for a in sd["applications"].values()):
             return await interaction.response.send_message("❌ You already have a pending application.", ephemeral=True)
         role = interaction.guild.get_role(config.SIGNUP_ROLE_ID)
@@ -430,10 +435,10 @@ async def _application_embed(guild, user, username, team) -> discord.Embed:
     info = f"Account created <t:{created}:R>"
     if user.joined_at:
         info += f"\nJoined server <t:{int(user.joined_at.timestamp())}:R>"
-    embed.add_field(name="👤 User Info", value=info, inline=False)
-    embed.add_field(name="📊 Levels", value=await _levels_text(user.id), inline=False)
-    embed.add_field(name="🏆 Previous Participations", value=_history_text(user.id), inline=False)
-    embed.add_field(name="🛡️ Moderation", value=await get_moderation_info(user.id), inline=False)
+    embed.add_field(name="User Info", value=info, inline=False)
+    embed.add_field(name="Levels", value=await _levels_text(user.id), inline=False)
+    embed.add_field(name="Previous Participations", value=_history_text(user.id), inline=False)
+    embed.add_field(name="Moderation", value=await get_moderation_info(user.id), inline=False)
 
     # Reflect capacity state for the reviewer
     if _is_full(sd):
@@ -544,10 +549,30 @@ class DenyModal(discord.ui.Modal, title="Deny Registration"):
             return await interaction.response.send_message("❌ This application is no longer pending.", ephemeral=True)
         await interaction.response.defer()
         reason = self.reason_input.value.strip()
+
+        # Block reapplying for this event.
+        if app["user_id"] not in sd.setdefault("denied", []):
+            sd["denied"].append(app["user_id"])
+
         if reason:
             await _dm(interaction.client, app["user_id"], "Registration denied",
                       f"Your registration for **{sd.get('event_name','the event')}** was denied.\n"
                       f"**Reason:** {reason}", discord.Color.red())
+
+        # Log the denial to the signup log channel.
+        log_ch = interaction.guild.get_channel(config.SIGNUP_LOG_CHANNEL_ID)
+        if log_ch:
+            embed = discord.Embed(title="Registration Denied", color=discord.Color.red(),
+                                  timestamp=datetime.datetime.now())
+            embed.add_field(name="User", value=f"<@{app['user_id']}>", inline=True)
+            embed.add_field(name="Username", value=app.get("username", "—"), inline=True)
+            if app.get("team"):
+                embed.add_field(name="Team", value=app["team"], inline=True)
+            embed.add_field(name="Denied by", value=interaction.user.mention, inline=True)
+            if reason:
+                embed.add_field(name="Reason", value=reason, inline=False)
+            await log_ch.send(embed=embed)
+
         _resolve_app(sd, app)
         await _finish_application_message(interaction, "✖️ Denied" + (f" — {reason}" if reason else ""),
                                           discord.Color.red())
@@ -658,7 +683,7 @@ class NewEventModal(discord.ui.Modal, title="New Signup Event"):
             "open": False, "teams_enabled": "teams" in flags, "application_mode": "application" in flags,
             "title": self.name_input.value.strip(), "description": self.desc_input.value.strip(),
             "event_name": self.name_input.value.strip(), "capacity": cap,
-            "open_at": None, "close_at": None, "participants": {}, "applications": {},
+            "open_at": None, "close_at": None, "participants": {}, "applications": {}, "denied": [],
         })
         store.save_data()
         await _refresh_all(self.bot)
@@ -865,6 +890,72 @@ class SignupCog(commands.Cog):
                 f"{'⭐ Prioritized' if p['priority'] else 'Removed priority for'} {user.mention} "
                 f"(now position **#{pos}**).", ephemeral=True)
 
+        @group.command(name="promote", description="Fill a slot from the waitlist (specific user, or the next in line)")
+        @app_commands.describe(user="Who to promote (leave blank for the next in the waitlist)")
+        @admin
+        async def signup_promote(interaction: discord.Interaction, user: discord.Member = None):
+            sd = _sd()
+            if _is_full(sd):
+                return await interaction.response.send_message(
+                    "❌ The roster is full — free a slot first (e.g. `/signup kick`).", ephemeral=True)
+            wl = _waitlist_sorted(sd)
+            if not wl:
+                return await interaction.response.send_message("❌ The waitlist is empty.", ephemeral=True)
+            await interaction.response.defer(ephemeral=True)
+
+            if user is None:
+                # Promote the next in line (reuses the shared promotion path).
+                await _promote_from_waitlist(interaction.client, interaction.guild)
+                await _refresh_all(self.bot)
+                promoted = wl[0]
+                return await interaction.followup.send(
+                    f"✅ Promoted next in line: **{promoted['username']}** "
+                    f"(<@{_uid_of(sd, promoted)}>).", ephemeral=True)
+
+            entry = sd["participants"].get(str(user.id))
+            if not entry or entry.get("status") != "waitlist":
+                return await interaction.followup.send("❌ That user isn't on the waitlist.", ephemeral=True)
+            entry["status"] = "active"
+            entry.pop("priority", None)
+            store.save_data()
+            role = interaction.guild.get_role(config.SIGNUP_ROLE_ID)
+            if role:
+                try:
+                    await user.add_roles(role, reason="Promoted from waitlist")
+                except discord.Forbidden:
+                    pass
+            await _apply_player_nick(user, entry["username"])
+            await _dm(interaction.client, str(user.id), "You're in! 🎉",
+                      f"You've been moved off the waitlist into **{sd.get('event_name','the event')}** "
+                      f"as **{entry['username']}**!", discord.Color.green())
+            await _refresh_all(self.bot)
+            await interaction.followup.send(f"✅ Promoted {user.mention} from the waitlist.", ephemeral=True)
+
+        @group.command(name="export", description="Export participant usernames")
+        @app_commands.describe(separator="How to separate usernames", include_waitlist="Include the waitlist too")
+        @app_commands.choices(separator=[
+            app_commands.Choice(name="Newline", value="newline"),
+            app_commands.Choice(name="Comma", value="comma"),
+        ])
+        @admin
+        async def signup_export(interaction: discord.Interaction,
+                                separator: str = "newline", include_waitlist: bool = False):
+            sd = _sd()
+            sep = "\n" if separator == "newline" else ", "
+            active_names = [p["username"] for p in _active(sd)]
+            text = sep.join(active_names)
+            if include_waitlist:
+                wl_names = [p["username"] for p in _waitlist_sorted(sd)]
+                if wl_names:
+                    text += f"\n\n--- Waitlist ---\n" + sep.join(wl_names)
+            if not text.strip():
+                return await interaction.response.send_message("No participants to export.", ephemeral=True)
+            buf = io.BytesIO(text.encode("utf-8"))
+            await interaction.response.send_message(
+                f"Export ({len(active_names)} participant(s)):",
+                file=discord.File(buf, filename=f"{sd.get('event_name','event')}_usernames.txt"),
+                ephemeral=True)
+
         @group.command(name="kick", description="Remove a participant from the event")
         @app_commands.describe(user="The participant to remove", notify="DM the user (default: yes)")
         @admin
@@ -924,6 +1015,7 @@ class SignupCog(commands.Cog):
             _archive_current_to_history()
             sd["participants"] = {}
             sd["applications"] = {}
+            sd["denied"] = []
             store.save_data()
 
             # Flush the live roster message (clear it; keep the message)
