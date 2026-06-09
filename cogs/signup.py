@@ -1013,12 +1013,22 @@ class SignupCog(commands.Cog):
                 except discord.Forbidden:
                     fail += 1
             _archive_current_to_history()
+            # Flush the whole event state back to a neutral, closed, empty event.
             sd["participants"] = {}
             sd["applications"] = {}
             sd["denied"] = []
+            sd["open"] = False
+            sd["open_at"] = None
+            sd["close_at"] = None
+            sd["capacity"] = None
+            sd["teams_enabled"] = False
+            sd["application_mode"] = False
+            sd["event_name"] = "No event active"
+            sd["title"] = "Nothing to see here"
+            sd["description"] = "Check back later"
             store.save_data()
 
-            # Flush the live roster message (clear it; keep the message)
+            # Flush the live roster + panel messages (clear them; keep them)
             await _flush_roster_message(self.bot)
             await update_signup_embed(self.bot)
 
