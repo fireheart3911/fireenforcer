@@ -410,13 +410,6 @@ class TicketsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="ticketpanel", description="Send the ticket panel with category buttons")
-    @app_commands.guilds(discord.Object(id=config.GUILD_ID))
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def ticketpanel(self, interaction: discord.Interaction):
-        await interaction.channel.send(embed=_panel_embed(), view=TicketView())
-        await interaction.response.send_message("Ticket panel sent!", ephemeral=True)
-
     @app_commands.command(name="closerequest", description="Ask the ticket owner whether the ticket can be closed")
     @app_commands.guilds(discord.Object(id=config.GUILD_ID))
     @app_commands.describe(hours="Hours until the ticket auto-closes with no response",
@@ -460,3 +453,8 @@ class TicketsCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(TicketsCog(bot))
+
+
+async def post_ticket_panel(interaction: discord.Interaction):
+    """Post the ticket category panel (called by the unified /panel command)."""
+    await interaction.channel.send(embed=_panel_embed(), view=TicketView())

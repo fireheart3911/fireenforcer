@@ -15,12 +15,15 @@ import config
 # Cog imports — all live in the repo; whether they're *loaded* is config-driven.
 from cogs.tickets import (
     TicketView, TicketControlView, CloseRequestView, close_ticket,
-    setup as setup_tickets,
+    post_ticket_panel, setup as setup_tickets,
 )
 from cogs.status import StatusView, setup_status_message, setup as setup_status
 from cogs.elo import EloSessionView, setup as setup_elo
 from cogs.council import CommentView, VoteView, VetoView, QuashView, setup as setup_council
-from cogs.signup import SignupView, ApplicationView, setup as setup_signup
+from cogs.signup import (
+    SignupView, ApplicationView, post_signup_panel, post_roster_panel,
+    setup as setup_signup,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +211,43 @@ client = BotClient(command_prefix=config.PREFIX, intents=intents)
 @client.tree.command(name="ping", description="Check bot latency", guild=config.GUILD_LIST[0])
 async def ping(interaction: discord.Interaction):
     await interaction.response.send_message(f"{client.latency * 1000:.2f} ms", ephemeral=True)
+
+
+@client.tree.command(name="panel", description="Post a module panel in this channel", guild=config.GUILD_LIST[0])
+@discord.app_commands.describe(panel="Which panel to post")
+@discord.app_commands.choices(panel=[
+    discord.app_commands.Choice(name="Tickets", value="tickets"),
+    discord.app_commands.Choice(name="Signup", value="signup"),
+    discord.app_commands.Choice(name="Signup roster (live participant list)", value="signup_roster"),
+    discord.app_commands.Choice(name="Status board", value="status_board"),
+])
+@discord.app_commands.checks.has_permissions(manage_guild=True)
+async def panel(interaction: discord.Interaction, panel: str):
+    # Map each panel choice to (required module, poster).
+    module_for = {
+        "tickets": "tickets",
+        "signup": "signup",
+        "signup_roster": "signup",
+        "status_board": "status",
+    }
+    needed = module_for[panel]
+    if not config.module_enabled(needed):
+        return await interaction.response.send_message(
+            f"❌ The **{needed}** module isn't enabled on this instance.", ephemeral=True)
+
+    if panel == "tickets":
+        await post_ticket_panel(interaction)
+    elif panel == "signup":
+        await post_signup_panel(interaction)
+    elif panel == "signup_roster":
+        await post_roster_panel(interaction)
+    elif panel == "status_board":
+        # The status board lives in its configured channel; repost it there.
+        store.storage.setdefault("status_message", {})["message_id"] = None
+        store.save_data()
+        await setup_status_message(client, config.STATUS_CHANNEL_ID.id)
+
+    await interaction.response.send_message(f"✅ Posted the **{panel}** panel.", ephemeral=True)
 
 
 client.run(os.environ["TOKEN"])
