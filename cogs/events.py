@@ -1,4 +1,5 @@
 import datetime
+import io
 import re
 
 import discord
@@ -160,7 +161,7 @@ EVENT_TYPES = {
 
 
 # ---------------------------------------------------------------------------
-# Panel embed
+# Panel content (Components V2 container)
 # ---------------------------------------------------------------------------
 
 _STATUS_LABEL = {
@@ -172,97 +173,136 @@ _STATUS_LABEL = {
 }
 
 
-def _event_embed(ev) -> discord.Embed:
+def _status_display(ev) -> tuple[str, discord.Color]:
+    """Status label + accent colour, with a FULL overlay on open rsvp events."""
     status_text, color = _STATUS_LABEL.get(ev.get("status"), ("—", discord.Color.greyple()))
-    # "Full" is a display overlay on an open rsvp event (date polls cap per option).
     if ev.get("status") == "open" and ev.get("mode") != "datepoll" and _is_full(ev):
-        status_text, color = "🟠 **FULL**", discord.Color.orange()
-    embed = discord.Embed(title=ev["name"], description=ev.get("description", ""),
-                          color=color, timestamp=datetime.datetime.now())
-    embed.add_field(name="Status", value=status_text, inline=True)
-    type_label = EVENT_TYPES.get(ev.get("type"), {}).get("label", ev.get("type", "—"))
-    embed.add_field(name="Type", value=type_label, inline=True)
-    if ev.get("host_id"):
-        embed.add_field(name="Host", value=f"<@{ev['host_id']}>", inline=True)
+        return "🟠 **FULL**", discord.Color.orange()
+    return status_text, color
 
-    n = len(_roster(ev))
-    cap = ev.get("capacity")
-    embed.add_field(name="Participants", value=f"{n}/{cap}" if cap else str(n), inline=True)
-    if n:
-        embed.add_field(name="Roster", value=_roster_field(ev), inline=False)
 
-    if ev.get("start_at"):
-        embed.add_field(name="Starts", value=f"<t:{int(ev['start_at'])}:F> (<t:{int(ev['start_at'])}:R>)",
-                        inline=False)
+def _datepoll_text(ev) -> str:
+    """Top-3 dates by votes for the panel (the full list lives behind a button)."""
+    opts = ev.get("date_options", [])
+    ranked = _ranked_dates(ev)
+    lead = _date_votes(ev, ranked[0]["key"]) if ranked else 0
+    lines = ["**📊 Date poll** — top 3 by votes"]
+    for o in ranked[:3]:
+        votes = _date_votes(ev, o["key"])
+        mark = " ⬅️ **leading**" if votes and votes == lead else ""
+        lines.append(f"<t:{int(o['at'])}:F> — **{votes}** vote(s){mark}")
+    if len(opts) > 3:
+        lines.append(f"…and **{len(opts) - 3}** more — press **View all dates**")
+    return "\n".join(lines)
 
-    if ev.get("mode") == "datepoll" and ev.get("date_options"):
-        opts = ev["date_options"]
-        ranked = _ranked_dates(ev)
-        lead = _date_votes(ev, ranked[0]["key"]) if ranked else 0
-        lines = []
-        for o in ranked[:3]:
-            votes = _date_votes(ev, o["key"])
-            mark = " ⬅️ **leading**" if votes and votes == lead else ""
-            lines.append(f"<t:{int(o['at'])}:F> — **{votes}** vote(s){mark}")
-        if len(opts) > 3:
-            lines.append(f"…and {len(opts) - 3} more option(s)")
-        embed.add_field(name="📊 Date poll (top 3)", value="\n".join(lines)[:1024], inline=False)
 
-    if ev.get("discord_event_id"):
-        embed.add_field(name="🗓️ Discord Event",
-                        value=f"[Open in Discord]({_discord_event_url(ev['discord_event_id'])})",
-                        inline=False)
-
-    extra = EVENT_TYPES.get(ev.get("type"), {}).get("extra_fields")
-    if extra:
-        for name, value in extra(ev):
-            embed.add_field(name=name, value=value, inline=False)
-
-    embed.set_footer(text=f"Event {ev['id']}")
-    return embed
+def _datepoll_full_text(ev) -> str:
+    """Every candidate date with its vote count and voters (for the button view)."""
+    lines = [f"**{ev['name']} — full date poll**"]
+    for o in sorted(ev.get("date_options", []), key=lambda o: o["at"]):
+        voters = [p["username"] for p in ev["participants"].values() if o["key"] in p.get("dates", [])]
+        lines.append(f"\n<t:{int(o['at'])}:F> — **{len(voters)}** vote(s)")
+        if voters:
+            lines.append("　" + ", ".join(voters))
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
 # Persistent event panel view (one registered instance routes every event)
 # ---------------------------------------------------------------------------
 
-class EventView(discord.ui.View):
-    """Single persistent view. Built with no event for registration (superset of
-    custom_ids), or with a specific event for rendering a panel. Callbacks resolve
-    the target event from the message id, so one registration handles every event."""
+class EventView(discord.ui.LayoutView):
+    """Single persistent Components V2 panel. Built with no event for registration
+    (superset of custom_ids), or with a specific event to render its card. Callbacks
+    resolve the target event from the message id, so one registration handles every
+    event."""
 
     def __init__(self, ev: dict | None = None):
         super().__init__(timeout=None)
-        mode = ev.get("mode") if ev else None
-        joinable = _is_joinable(ev) if ev else True
+        if ev is None:
+            self.add_item(self._registration_container())
+            return
 
-        if ev is None or mode == "datepoll":
+        status_text, color = _status_display(ev)
+        c = discord.ui.Container(accent_colour=color)
+        type_label = EVENT_TYPES.get(ev.get("type"), {}).get("label", ev.get("type", "—"))
+        header = f"## {ev['name']}\n{status_text}　·　**Type:** {type_label}"
+        if ev.get("host_id"):
+            header += f"　·　**Host:** <@{ev['host_id']}>"
+        c.add_item(discord.ui.TextDisplay(header))
+        if ev.get("description"):
+            c.add_item(discord.ui.TextDisplay(ev["description"][:2000]))
+        c.add_item(discord.ui.Separator())
+
+        n = len(_roster(ev))
+        cap = ev.get("capacity")
+        details = [f"**Participants:** {n}/{cap}" if cap else f"**Participants:** {n}"]
+        if ev.get("start_at"):
+            details.append(f"**Starts:** <t:{int(ev['start_at'])}:F> (<t:{int(ev['start_at'])}:R>)")
+        if ev.get("discord_event_id"):
+            details.append(f"**Discord event:** [open in Discord]({_discord_event_url(ev['discord_event_id'])})")
+        c.add_item(discord.ui.TextDisplay("\n".join(details)))
+        if n:
+            c.add_item(discord.ui.TextDisplay(f"**Roster**\n{_roster_field(ev)}"))
+        if ev.get("mode") == "datepoll" and ev.get("date_options"):
+            c.add_item(discord.ui.TextDisplay(_datepoll_text(ev)))
+        extra = EVENT_TYPES.get(ev.get("type"), {}).get("extra_fields")
+        if extra:
+            for name, value in extra(ev):
+                c.add_item(discord.ui.TextDisplay(f"**{name}** {value}"))
+        c.add_item(discord.ui.TextDisplay(f"-# Event {ev['id']}"))
+
+        for row in self._action_rows(ev):
+            c.add_item(row)
+        self.add_item(c)
+
+    # ---- component builders ----
+
+    def _registration_container(self) -> discord.ui.Container:
+        """Superset of custom_ids so one persistent registration routes every event."""
+        c = discord.ui.Container()
+        c.add_item(discord.ui.TextDisplay("Event"))
+        sel = discord.ui.Select(custom_id="event:datevote", min_values=0, max_values=1,
+                                options=[discord.SelectOption(label="—", value="—")])
+        sel.callback = self._on_datevote
+        c.add_item(discord.ui.ActionRow(sel))
+        join = discord.ui.Button(label="Join", custom_id="event:rsvp")
+        join.callback = self._on_join
+        leave = discord.ui.Button(label="Leave", custom_id="event:leave")
+        leave.callback = self._on_leave
+        viewd = discord.ui.Button(label="View all dates", custom_id="event:viewdates")
+        viewd.callback = self._on_viewdates
+        c.add_item(discord.ui.ActionRow(join, leave, viewd))
+        return c
+
+    def _action_rows(self, ev) -> list:
+        if ev.get("status") in _TERMINAL:
+            return []
+        joinable = _is_joinable(ev)
+        if ev.get("mode") == "datepoll":
             opts = []
-            if ev and ev.get("date_options"):
-                for o in sorted(ev["date_options"], key=lambda o: o["at"]):
-                    dt = datetime.datetime.fromtimestamp(o["at"])
-                    opts.append(discord.SelectOption(label=dt.strftime("%a %d %b %Y %H:%M"),
-                                                     value=o["key"]))
+            for o in sorted(ev.get("date_options", []), key=lambda o: o["at"]):
+                dt = datetime.datetime.fromtimestamp(o["at"])
+                opts.append(discord.SelectOption(label=dt.strftime("%a %d %b %Y %H:%M")[:100], value=o["key"]))
             if not opts:
                 opts = [discord.SelectOption(label="—", value="—")]
-            select = discord.ui.Select(
-                placeholder="Pick the date(s) you can attend…",
-                custom_id="event:datevote", min_values=0, max_values=len(opts),
-                options=opts, disabled=not joinable)
-            select.callback = self._on_datevote
-            self.add_item(select)
-        if ev is None or mode == "rsvp":
-            full = bool(ev) and _is_full(ev)
-            join = discord.ui.Button(label="Join", style=discord.ButtonStyle.green,
-                                     emoji="✍️", custom_id="event:rsvp",
-                                     disabled=not joinable or full)
-            join.callback = self._on_join
-            self.add_item(join)
+            sel = discord.ui.Select(placeholder="Pick the date(s) you can attend…",
+                                    custom_id="event:datevote", min_values=0, max_values=len(opts),
+                                    options=opts, disabled=not joinable)
+            sel.callback = self._on_datevote
+            viewd = discord.ui.Button(label="View all dates", emoji="📋", custom_id="event:viewdates")
+            viewd.callback = self._on_viewdates
+            leave = discord.ui.Button(label="Leave", style=discord.ButtonStyle.gray, custom_id="event:leave")
+            leave.callback = self._on_leave
+            return [discord.ui.ActionRow(sel), discord.ui.ActionRow(viewd, leave)]
 
-        leave = discord.ui.Button(label="Leave", style=discord.ButtonStyle.gray,
-                                  custom_id="event:leave")
+        full = _is_full(ev)
+        join = discord.ui.Button(label="Join", style=discord.ButtonStyle.green, emoji="✍️",
+                                 custom_id="event:rsvp", disabled=not joinable or full)
+        join.callback = self._on_join
+        leave = discord.ui.Button(label="Leave", style=discord.ButtonStyle.gray, custom_id="event:leave")
         leave.callback = self._on_leave
-        self.add_item(leave)
+        return [discord.ui.ActionRow(join, leave)]
 
     async def _on_join(self, interaction: discord.Interaction):
         ev = _event_by_message(interaction.message.id)
@@ -307,6 +347,21 @@ class EventView(discord.ui.View):
         store.save_data()
         await update_event_panel(interaction.client, ev)
         await interaction.response.send_message("👋 You've left the event.", ephemeral=True)
+
+    async def _on_viewdates(self, interaction: discord.Interaction):
+        ev = _event_by_message(interaction.message.id)
+        if not ev:
+            return await interaction.response.send_message("❌ This event no longer exists.", ephemeral=True)
+        if ev.get("mode") != "datepoll" or not ev.get("date_options"):
+            return await interaction.response.send_message("❌ This event has no date poll.", ephemeral=True)
+        text = _datepoll_full_text(ev)
+        if len(text) <= 1900:
+            await interaction.response.send_message(text, ephemeral=True)
+        else:
+            buf = io.BytesIO(text.encode("utf-8"))
+            await interaction.response.send_message(
+                "Full date poll attached:",
+                file=discord.File(buf, filename=f"{ev['id']}_dates.txt"), ephemeral=True)
 
 
 def _event_by_message(message_id):
@@ -358,7 +413,7 @@ class RSVPModal(discord.ui.Modal, title="Join Event"):
 # ---------------------------------------------------------------------------
 
 async def post_event_panel(channel, ev):
-    msg = await channel.send(embed=_event_embed(ev), view=EventView(ev))
+    msg = await channel.send(view=EventView(ev))
     ev["channel_id"] = str(channel.id)
     ev["panel_message_id"] = str(msg.id)
     store.save_data()
@@ -370,10 +425,10 @@ async def update_event_panel(client, ev):
     channel = client.get_channel(int(ev["channel_id"]))
     if not channel:
         return
-    view = EventView(ev) if ev.get("status") not in _TERMINAL else None
+    # Terminal events keep the card (final state) but drop the action rows.
     try:
         msg = await channel.fetch_message(int(ev["panel_message_id"]))
-        await msg.edit(embed=_event_embed(ev), view=view)
+        await msg.edit(view=EventView(ev))
     except discord.NotFound:
         ev["panel_message_id"] = None
         ev["channel_id"] = None
