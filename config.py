@@ -188,3 +188,15 @@ if module_enabled("signup"):
     SIGNUP_APPLICATION_CHANNEL_ID = _opt_int("SIGNUP_APPLICATION_CHANNEL_ID")
 else:
     SIGNUP_ROLE_ID = SIGNUP_LOG_CHANNEL_ID = SIGNUP_APPLICATION_CHANNEL_ID = None
+
+
+# ---------------------------------------------------------------------------
+# Events module
+# ---------------------------------------------------------------------------
+# Events post their own panels in whatever channel they're created in, so no
+# channel is required. The log channel is optional (reserved for future use).
+
+if module_enabled("events"):
+    EVENTS_LOG_CHANNEL_ID = _opt_int("EVENTS_LOG_CHANNEL_ID")
+else:
+    EVENTS_LOG_CHANNEL_ID = None

@@ -24,6 +24,7 @@ from cogs.signup import (
     SignupView, ApplicationView, post_signup_panel, post_roster_panel,
     setup as setup_signup,
 )
+from cogs.events import EventView, setup as setup_events
 
 
 # ---------------------------------------------------------------------------
@@ -56,9 +57,12 @@ class BotClient(commands.Bot):
         if enabled("signup"):
             self.add_view(SignupView())
             self.add_view(ApplicationView())
+        if enabled("events"):
+            self.add_view(EventView())
 
         # --- load cogs ---
         self._status_cog = self._elo_cog = self._council_cog = self._signup_cog = None
+        self._events_cog = None
 
         if enabled("tickets"):
             await setup_tickets(self)
@@ -77,6 +81,8 @@ class BotClient(commands.Bot):
             self._council_cog = await setup_council(self)
         if enabled("signup"):
             self._signup_cog = await setup_signup(self)
+        if enabled("events"):
+            self._events_cog = await setup_events(self)
 
         # --- sync slash commands once (here, not in on_ready) ---
         for guild_obj in config.GUILD_LIST:
@@ -106,6 +112,8 @@ class BotClient(commands.Bot):
             loops.append(self._council_cog.tick)
         if self._signup_cog:
             loops.append(self._signup_cog.schedule_tick)
+        if self._events_cog:
+            loops.append(self._events_cog.events_tick)
         if config.module_enabled("tickets"):
             loops.append(self.autoclose_tickets)
         for loop in loops:
