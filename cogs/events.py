@@ -67,6 +67,12 @@ def _date_votes(ev, key) -> int:
     return sum(1 for p in ev["participants"].values() if key in p.get("dates", []))
 
 
+def _ranked_dates(ev) -> list:
+    """Date options ordered by votes (desc), ties broken by earliest date."""
+    return sorted(ev.get("date_options", []),
+                  key=lambda o: (-_date_votes(ev, o["key"]), o["at"]))
+
+
 # ---------------------------------------------------------------------------
 # DM helper (embeds) — mirrors signup._dm
 # ---------------------------------------------------------------------------
@@ -168,11 +174,16 @@ _STATUS_LABEL = {
 
 def _event_embed(ev) -> discord.Embed:
     status_text, color = _STATUS_LABEL.get(ev.get("status"), ("—", discord.Color.greyple()))
+    # "Full" is a display overlay on an open rsvp event (date polls cap per option).
+    if ev.get("status") == "open" and ev.get("mode") != "datepoll" and _is_full(ev):
+        status_text, color = "🟠 **FULL**", discord.Color.orange()
     embed = discord.Embed(title=ev["name"], description=ev.get("description", ""),
                           color=color, timestamp=datetime.datetime.now())
     embed.add_field(name="Status", value=status_text, inline=True)
     type_label = EVENT_TYPES.get(ev.get("type"), {}).get("label", ev.get("type", "—"))
     embed.add_field(name="Type", value=type_label, inline=True)
+    if ev.get("host_id"):
+        embed.add_field(name="Host", value=f"<@{ev['host_id']}>", inline=True)
 
     n = len(_roster(ev))
     cap = ev.get("capacity")
@@ -185,14 +196,17 @@ def _event_embed(ev) -> discord.Embed:
                         inline=False)
 
     if ev.get("mode") == "datepoll" and ev.get("date_options"):
+        opts = ev["date_options"]
+        ranked = _ranked_dates(ev)
+        lead = _date_votes(ev, ranked[0]["key"]) if ranked else 0
         lines = []
-        opts = sorted(ev["date_options"], key=lambda o: o["at"])
-        top = max((_date_votes(ev, o["key"]) for o in opts), default=0)
-        for o in opts:
+        for o in ranked[:3]:
             votes = _date_votes(ev, o["key"])
-            lead = " ⬅️ **leading**" if votes and votes == top else ""
-            lines.append(f"<t:{int(o['at'])}:F> — **{votes}** vote(s){lead}")
-        embed.add_field(name="📊 Date poll", value="\n".join(lines)[:1024], inline=False)
+            mark = " ⬅️ **leading**" if votes and votes == lead else ""
+            lines.append(f"<t:{int(o['at'])}:F> — **{votes}** vote(s){mark}")
+        if len(opts) > 3:
+            lines.append(f"…and {len(opts) - 3} more option(s)")
+        embed.add_field(name="📊 Date poll (top 3)", value="\n".join(lines)[:1024], inline=False)
 
     if ev.get("discord_event_id"):
         embed.add_field(name="🗓️ Discord Event",
@@ -238,8 +252,10 @@ class EventView(discord.ui.View):
             select.callback = self._on_datevote
             self.add_item(select)
         if ev is None or mode == "rsvp":
+            full = bool(ev) and _is_full(ev)
             join = discord.ui.Button(label="Join", style=discord.ButtonStyle.green,
-                                     emoji="✍️", custom_id="event:rsvp", disabled=not joinable)
+                                     emoji="✍️", custom_id="event:rsvp",
+                                     disabled=not joinable or full)
             join.callback = self._on_join
             self.add_item(join)
 
@@ -442,6 +458,7 @@ class CreateEventModal(discord.ui.Modal):
             "reminders": reminders, "reminders_sent": [],
             "date_options": date_options, "participants": {},
             "discord_event_id": self.discord_event_id,
+            "host_id": str(interaction.user.id),
         }
         _events()[eid] = ev
         await post_event_panel(interaction.channel, ev)
@@ -654,6 +671,115 @@ class BrainlagResolveView(discord.ui.View):
 
 
 # ---------------------------------------------------------------------------
+# Date-poll close (host picks the winning date)
+# ---------------------------------------------------------------------------
+
+class PollCloseView(discord.ui.View):
+    """Host-only flow: pick the winning date from the top 3, with options to
+    notify confirmed participants and to remove those who voted for other dates."""
+
+    def __init__(self, bot, event_id):
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.event_id = event_id
+        self.notify = False
+        self.kick = False
+        ev = _event(event_id)
+        self.top = _ranked_dates(ev)[:3] if ev else []
+        self.chosen = self.top[0]["key"] if self.top else None
+
+        opts = []
+        for o in self.top:
+            dt = datetime.datetime.fromtimestamp(o["at"])
+            opts.append(discord.SelectOption(
+                label=dt.strftime("%a %d %b %Y %H:%M"),
+                description=f"{_date_votes(ev, o['key'])} vote(s)",
+                value=o["key"], default=(o["key"] == self.chosen)))
+        select = discord.ui.Select(
+            placeholder="Pick the winning date…", row=0, min_values=1, max_values=1,
+            options=opts or [discord.SelectOption(label="—", value="—")], disabled=not opts)
+        select.callback = self._on_pick
+        self.add_item(select)
+        self._sync()
+
+    def _sync(self):
+        self.toggle_notify.label = f"Notify confirmed: {'ON' if self.notify else 'OFF'}"
+        self.toggle_notify.style = discord.ButtonStyle.green if self.notify else discord.ButtonStyle.gray
+        self.toggle_kick.label = f"Remove others: {'ON' if self.kick else 'OFF'}"
+        self.toggle_kick.style = discord.ButtonStyle.danger if self.kick else discord.ButtonStyle.gray
+
+    async def _on_pick(self, interaction: discord.Interaction):
+        self.chosen = interaction.data["values"][0]
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Notify confirmed: OFF", row=1)
+    async def toggle_notify(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.notify = not self.notify
+        self._sync()
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="Remove others: OFF", row=1)
+    async def toggle_kick(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.kick = not self.kick
+        self._sync()
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="Confirm & close", style=discord.ButtonStyle.green, emoji="✅", row=2)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ev = _event(self.event_id)
+        if not ev:
+            return await interaction.response.send_message("❌ Event not found.", ephemeral=True)
+        if not self.chosen or self.chosen == "—":
+            return await interaction.response.send_message("❌ Pick a date first.", ephemeral=True)
+        winner = next((o for o in ev.get("date_options", []) if o["key"] == self.chosen), None)
+        if not winner:
+            return await interaction.response.send_message("❌ That date no longer exists.", ephemeral=True)
+        await interaction.response.defer()
+
+        ev["start_at"] = winner["at"]
+        ev["mode"] = "rsvp"
+        ev["status"] = "locked"
+        ev["reminders_sent"] = []
+        winners, others = [], []
+        for uid, p in list(ev["participants"].items()):
+            if self.chosen in p.get("dates", []):
+                p["status"] = "active"
+                winners.append(uid)
+            else:
+                others.append(uid)
+        for uid in others:
+            if self.kick:
+                ev["participants"].pop(uid, None)
+            else:
+                ev["participants"][uid]["status"] = "unavailable"
+        store.save_data()
+        await update_event_panel(self.bot, ev)
+
+        # Channel notice.
+        channel = self.bot.get_channel(int(ev["channel_id"])) if ev.get("channel_id") else None
+        if channel:
+            note = (f"📅 **{ev['name']}** date locked: <t:{int(winner['at'])}:F> "
+                    f"(<t:{int(winner['at'])}:R>).")
+            if others:
+                note += f"\n{len(others)} non-attendee(s) {'removed' if self.kick else 'marked unavailable'}."
+            await channel.send(note)
+
+        # Optional DM to confirmed participants.
+        sent = 0
+        if self.notify:
+            for uid in winners:
+                if await _dm(self.bot, uid, f"{ev['name']} — date confirmed 📅",
+                             f"The date for **{ev['name']}** is set: <t:{int(winner['at'])}:F> "
+                             f"(<t:{int(winner['at'])}:R>). See you there!", discord.Color.green()):
+                    sent += 1
+
+        summary = (f"✅ Locked <t:{int(winner['at'])}:F> — {len(winners)} confirmed, "
+                   f"{len(others)} {'removed' if self.kick else 'unavailable'}")
+        summary += f", {sent} notified." if self.notify else "."
+        await interaction.edit_original_response(content=summary, view=None)
+
+
+# ---------------------------------------------------------------------------
 # Roster field (shown on the event panel)
 # ---------------------------------------------------------------------------
 
@@ -849,7 +975,7 @@ class EventsCog(commands.Cog):
 
         # ---- date poll ----
 
-        @poll.command(name="close", description="Close the date poll and lock in the winning date")
+        @poll.command(name="close", description="Close the date poll — pick the winning date (top 3 by votes)")
         @describe
         @ac
         @admin
@@ -861,36 +987,10 @@ class EventsCog(commands.Cog):
                 return await interaction.response.send_message("❌ That event isn't a date poll.", ephemeral=True)
             if not ev.get("date_options"):
                 return await interaction.response.send_message("❌ No candidate dates.", ephemeral=True)
-            await interaction.response.defer(ephemeral=True)
-            # Winner: most votes, ties broken by earliest date.
-            opts = sorted(ev["date_options"], key=lambda o: o["at"])
-            winner = max(opts, key=lambda o: _date_votes(ev, o["key"]))
-            ev["start_at"] = winner["at"]
-            ev["mode"] = "rsvp"
-            ev["status"] = "locked"
-            ev["reminders_sent"] = []
-            # Voters for the winning date stay active; others become unavailable.
-            dropped = []
-            for uid, p in ev["participants"].items():
-                if winner["key"] in p.get("dates", []):
-                    p["status"] = "active"
-                else:
-                    p["status"] = "unavailable"
-                    dropped.append(uid)
-            store.save_data()
-            await update_event_panel(self.bot, ev)
-            # Channel notice (ping only).
-            channel = self.bot.get_channel(int(ev["channel_id"])) if ev.get("channel_id") else None
-            if channel:
-                drop_ping = " ".join(f"<@{u}>" for u in dropped)
-                note = (f"📅 **{ev['name']}** date locked: <t:{int(winner['at'])}:F> "
-                        f"(<t:{int(winner['at'])}:R>).")
-                if drop_ping:
-                    note += f"\nCouldn't make it: {drop_ping}"
-                await channel.send(note)
-            await interaction.followup.send(
-                f"✅ Winning date: <t:{int(winner['at'])}:F> — "
-                f"{len(_roster(ev))} confirmed, {len(dropped)} unavailable.", ephemeral=True)
+            await interaction.response.send_message(
+                content="**Close the date poll.** Pick the winning date (top 3 by votes), "
+                        "toggle the options, then confirm:",
+                view=PollCloseView(self.bot, ev["id"]), ephemeral=True)
 
         # ---- brainlag ----
 
