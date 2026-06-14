@@ -200,3 +200,34 @@ if module_enabled("events"):
     EVENTS_LOG_CHANNEL_ID = _opt_int("EVENTS_LOG_CHANNEL_ID")
 else:
     EVENTS_LOG_CHANNEL_ID = None
+
+
+# ---------------------------------------------------------------------------
+# Moderation module
+# ---------------------------------------------------------------------------
+# Command access is Administrator-by-default (configurable per command in Discord's
+# Server Settings → Integrations), so there are no moderation role env vars. The
+# shared MariaDB/MySQL (MOD_DB_*) backs the cross-instance global banlist + flags;
+# presentation strings (rules, network name, appeal link) come from config.json.
+
+if module_enabled("moderation"):
+    MOD_LOG_CHANNEL_ID = _opt_int("MOD_LOG_CHANNEL_ID")
+    MOD_DB_HOST     = _opt_str("MOD_DB_HOST")
+    MOD_DB_PORT     = _opt_int("MOD_DB_PORT", 3306)
+    MOD_DB_USER     = _opt_str("MOD_DB_USER")
+    MOD_DB_PASSWORD = _opt_str("MOD_DB_PASSWORD")
+    MOD_DB_NAME     = _opt_str("MOD_DB_NAME")
+    _mod_cfg = _cfg.get("moderation", {})
+    MOD_NETWORK_NAME = _mod_cfg.get("network_name", "the network")
+    MOD_APPEAL_LINK  = _mod_cfg.get("appeal_link")
+    MOD_RULES = {
+        int(r["id"]): {"title": r.get("title", f"Rule {r['id']}"), "text": r.get("text", "")}
+        for r in _mod_cfg.get("rules", []) if "id" in r
+    }
+else:
+    MOD_LOG_CHANNEL_ID = None
+    MOD_DB_HOST = MOD_DB_USER = MOD_DB_PASSWORD = MOD_DB_NAME = None
+    MOD_DB_PORT = 3306
+    MOD_NETWORK_NAME = "the network"
+    MOD_APPEAL_LINK = None
+    MOD_RULES = {}

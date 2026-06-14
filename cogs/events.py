@@ -9,6 +9,7 @@ from discord import app_commands
 import storage as store
 import config
 from cogs.parsers import parse_eu_datetime, parse_duration_seconds
+from cogs import moderation
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +317,9 @@ class EventView(discord.ui.LayoutView):
             return await interaction.response.send_message("❌ You've already joined this event!", ephemeral=True)
         if _is_full(ev):
             return await interaction.response.send_message("❌ This event is full.", ephemeral=True)
+        allowed, why = moderation.gate_check(uid)
+        if not allowed:
+            return await interaction.response.send_message(f"❌ {why}", ephemeral=True)
         await interaction.response.send_modal(RSVPModal(ev["id"], mode="rsvp"))
 
     async def _on_datevote(self, interaction: discord.Interaction):
@@ -327,6 +331,9 @@ class EventView(discord.ui.LayoutView):
         picked = [v for v in (interaction.data.get("values") or []) if v != "—"]
         uid = str(interaction.user.id)
         if uid not in ev["participants"]:
+            allowed, why = moderation.gate_check(uid)
+            if not allowed:
+                return await interaction.response.send_message(f"❌ {why}", ephemeral=True)
             # Need a username before we can record a vote.
             return await interaction.response.send_modal(RSVPModal(ev["id"], mode="datepoll", dates=picked))
         ev["participants"][uid]["dates"] = picked
@@ -393,6 +400,9 @@ class RSVPModal(discord.ui.Modal, title="Join Event"):
             return await interaction.response.send_message("❌ This event isn't open.", ephemeral=True)
         username = self.username_input.value.strip()
         uid = str(interaction.user.id)
+        allowed, why = moderation.gate_check(uid)
+        if not allowed:
+            return await interaction.response.send_message(f"❌ {why}", ephemeral=True)
         if self.mode == "rsvp" and _is_full(ev):
             return await interaction.response.send_message("❌ This event is full.", ephemeral=True)
         ev["participants"][uid] = {
@@ -1017,8 +1027,10 @@ class EventsCog(commands.Cog):
                 }
                 store.save_data()
                 await update_event_panel(self.bot, ev)
+                info = moderation.get_moderation_info(user.id)
+                note = "" if info.startswith("✅") else f"\n⚠️ Heads up — this user has a moderation record:\n{info}"
                 await interaction.response.send_message(
-                    f"✅ Added {user.mention} as **{username.strip()}**.", ephemeral=True)
+                    f"✅ Added {user.mention} as **{username.strip()}**.{note}", ephemeral=True)
             else:
                 if uid not in ev["participants"]:
                     return await interaction.response.send_message(

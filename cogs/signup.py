@@ -10,6 +10,7 @@ import storage as store
 import config
 from cogs.parsers import parse_eu_datetime
 from cogs import xp_api
+from cogs import moderation
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +265,9 @@ class SignupView(discord.ui.View):
             return await interaction.response.send_message(
                 "❌ Your registration for this event was declined. You can apply again at the next event.",
                 ephemeral=True)
+        allowed, why = moderation.gate_check(uid)
+        if not allowed:
+            return await interaction.response.send_message(f"❌ {why}", ephemeral=True)
         if any(a["user_id"] == uid and a["status"] == "pending" for a in sd["applications"].values()):
             return await interaction.response.send_message("❌ You already have a pending application.", ephemeral=True)
         role = interaction.guild.get_role(config.SIGNUP_ROLE_ID)
@@ -476,8 +480,8 @@ def _history_text(user_id) -> str:
 
 
 async def get_moderation_info(user_id) -> str:
-    """Stub for the (to-be-implemented) global moderation system."""
-    return "✅ No incidents on record."
+    """Delegate to the moderation module (no-ops to a clean string when disabled)."""
+    return moderation.get_moderation_info(user_id)
 
 
 class ApplicationView(discord.ui.View):

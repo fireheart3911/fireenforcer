@@ -654,6 +654,8 @@ async def _close_voting(client: commands.Bot, vote: dict):
     if outcome == "passed":
         if vote["kind"] == "proposal":
             await _enter_veto_window(client, vote)
+        elif vote["kind"] == "ban":
+            await _enter_ban_veto_window(client, vote)
         else:
             await _apply_promotion(client, guild, vote)
         return
@@ -716,6 +718,129 @@ async def _apply_veto(client: commands.Bot, vote: dict, owner_id: int):
         except discord.HTTPException:
             pass
     await council_log(client, f"🛑 Proposal **{vote['title']}** (`{vote['id']}`) vetoed by <@{owner_id}>.")
+
+
+async def _clear_owner_buttons(client: commands.Bot, vote: dict):
+    owner_channel = client.get_channel(config.OWNER_CHANNEL_ID)
+    if owner_channel and vote.get("owner_msg_id"):
+        try:
+            msg = await owner_channel.fetch_message(int(vote["owner_msg_id"]))
+            await msg.edit(view=None)
+        except discord.HTTPException:
+            pass
+
+
+async def _enter_ban_veto_window(client: commands.Bot, vote: dict):
+    """A ban vote passed — the owner decides: blacklist (global), local ban, or veto."""
+    vote["status"] = "veto"
+    vote["veto_ends_at"] = datetime.datetime.now().timestamp() + PROPOSAL_VETO_PERIOD
+    store.save_data()
+    await _refresh_vote_message(client, vote)
+
+    owner_channel = client.get_channel(config.OWNER_CHANNEL_ID)
+    if owner_channel:
+        embed = build_vote_embed(client.get_guild(config.GUILD_ID), vote)
+        embed.title = f"[Ban — owner decision] {vote['title']}"
+        try:
+            msg = await owner_channel.send(embed=embed, view=BanVetoView())
+            vote["owner_msg_id"] = str(msg.id)
+            store.save_data()
+        except discord.HTTPException as e:
+            print(f"Failed to post ban veto message: {e}")
+    await council_log(client, f"⚖️ Ban vote **{vote['title']}** (`{vote['id']}`) passed — "
+                              f"owner decision required (blacklist / local / veto).")
+
+
+async def _apply_ban_vote(client: commands.Bot, vote: dict, scope: str, owner_id: int = None):
+    """Enact a passed ban vote at the chosen scope (timeout default = local)."""
+    from cogs import moderation, mod_db  # lazy: avoids a circular import
+
+    guild = client.get_guild(config.GUILD_ID)
+    term_days = int(vote.get("term_days") or 365)
+    expires_at = datetime.datetime.now().timestamp() + term_days * 86400
+    target_id = vote["target_id"]
+    reason = vote.get("reason") or "Council ban vote"
+    rules = vote.get("violated_rules") or ""
+
+    vote["status"] = "applied"
+    vote["ban_scope"] = scope
+    store.save_data()
+    await _refresh_vote_message(client, vote)
+    await _clear_owner_buttons(client, vote)
+    await _archive_thread(client, vote)
+
+    if not mod_db.is_ready():
+        await council_log(client, f"⚠️ Ban `{vote['id']}` approved ({scope}) but the moderation "
+                                  f"database is unavailable — not applied.")
+        return
+
+    await mod_db.add_ban(target_id, reason, rules, owner_id or vote["initiator_id"],
+                         expires_at, scope, config.GUILD_ID)
+    await moderation.sync_and_enforce(client)
+    await moderation.send_ban_notice(client, target_id, reason, rules, expires_at, scope,
+                                     guild.name if guild else "the server", approver="council")
+    label = "blacklisted across the network" if scope == "global" else "banned locally"
+    by = f" (approved by <@{owner_id}>)" if owner_id else " (default after veto window)"
+    await council_log(client, f"⛔ <@{target_id}> {label} for {term_days}d via ban vote "
+                              f"`{vote['id']}`{by}.")
+
+
+async def _veto_ban_vote(client: commands.Bot, vote: dict, owner_id: int):
+    vote["status"] = "vetoed"
+    vote["vetoed_by"] = str(owner_id)
+    store.save_data()
+    await _refresh_vote_message(client, vote)
+    await _clear_owner_buttons(client, vote)
+    await _archive_thread(client, vote)
+    await council_log(client, f"🛑 Ban vote **{vote['title']}** (`{vote['id']}`) vetoed by <@{owner_id}>.")
+
+
+class BanVetoView(discord.ui.View):
+    """Owner decision for a passed ban vote: blacklist (global), local ban, or veto."""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def _guard(self, interaction: discord.Interaction) -> dict | None:
+        vote = _find_vote_by_owner_msg(interaction.message.id)
+        if not vote or vote.get("kind") != "ban":
+            await interaction.response.send_message("❌ No ban vote bound to this message.", ephemeral=True)
+            return None
+        if vote["status"] != "veto":
+            await interaction.response.send_message("❌ This vote isn't awaiting an owner decision.", ephemeral=True)
+            return None
+        if not is_owner_member(interaction.user):
+            await interaction.response.send_message("❌ Only owners may decide.", ephemeral=True)
+            return None
+        return vote
+
+    @discord.ui.button(label="Approve + Blacklist", style=discord.ButtonStyle.danger, emoji="⛔",
+                       custom_id="cv:ban:blacklist")
+    async def blacklist(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vote = await self._guard(interaction)
+        if not vote:
+            return
+        await interaction.response.defer(ephemeral=True)
+        await _apply_ban_vote(interaction.client, vote, scope="global", owner_id=interaction.user.id)
+        await interaction.followup.send("⛔ Blacklisted across the network.", ephemeral=True)
+
+    @discord.ui.button(label="Approve (local)", style=discord.ButtonStyle.secondary, emoji="🔨",
+                       custom_id="cv:ban:local")
+    async def local(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vote = await self._guard(interaction)
+        if not vote:
+            return
+        await interaction.response.defer(ephemeral=True)
+        await _apply_ban_vote(interaction.client, vote, scope="local", owner_id=interaction.user.id)
+        await interaction.followup.send("🔨 Banned in this server only.", ephemeral=True)
+
+    @discord.ui.button(label="Veto", style=discord.ButtonStyle.red, emoji="🛑", custom_id="cv:ban:veto")
+    async def veto(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vote = await self._guard(interaction)
+        if not vote:
+            return
+        await interaction.response.defer(ephemeral=True)
+        await _veto_ban_vote(interaction.client, vote, interaction.user.id)
+        await interaction.followup.send("🛑 Ban vote vetoed.", ephemeral=True)
 
 
 async def _apply_promotion(client: commands.Bot, guild: discord.Guild, vote: dict):
@@ -831,7 +956,10 @@ class CouncilCog(commands.Cog):
                 elif vote["status"] == "voting" and now >= vote["voting_ends_at"]:
                     await _close_voting(self.bot, vote)
                 elif vote["status"] == "veto" and now >= vote["veto_ends_at"]:
-                    await _finalize_proposal(self.bot, vote)
+                    if vote["kind"] == "ban":
+                        await _apply_ban_vote(self.bot, vote, scope="local")
+                    else:
+                        await _finalize_proposal(self.bot, vote)
             except Exception as e:
                 print(f"Vote tick error on {vote.get('id')}: {e}")
 
@@ -858,7 +986,13 @@ class CouncilCog(commands.Cog):
 
         await council_log(self.bot,
                           f"✅ <@{user.id}> verified by <@{interaction.user.id}> — assigned Guest.")
-        await interaction.response.send_message(f"✅ Verified {user.mention} as Guest.", ephemeral=True)
+        note = ""
+        if config.module_enabled("moderation"):
+            from cogs import moderation  # lazy
+            info = moderation.get_moderation_info(user.id)
+            if not info.startswith("✅"):
+                note = f"\n⚠️ Note — this user has a moderation record:\n{info}"
+        await interaction.response.send_message(f"✅ Verified {user.mention} as Guest.{note}", ephemeral=True)
 
     def _register_commands(self):
         vote_group = self.vote_subgroup
@@ -927,6 +1061,46 @@ class CouncilCog(commands.Cog):
             if not is_council(interaction.user):
                 return await interaction.response.send_message("❌ Council/owners only.", ephemeral=True)
             await interaction.response.send_modal(ProposalModal(self))
+
+        # Ban vote — only when the moderation module is also enabled (it does the banning).
+        if config.module_enabled("moderation"):
+            async def _start_ban(interaction: discord.Interaction, target: discord.Member,
+                                 reason: str, rules: str, term: int):
+                if not is_council(interaction.user):
+                    return await interaction.response.send_message("❌ Council/owners only.", ephemeral=True)
+                from cogs import moderation  # lazy
+                if moderation._is_protected(target):
+                    return await interaction.response.send_message(
+                        "❌ That member is protected (admin/owner/council) and can't be ban-voted.",
+                        ephemeral=True)
+                await interaction.response.defer(ephemeral=True)
+                rule_txt = ", ".join(f"Rule {r}" for r in moderation._parse_rule_ids(rules)) or "—"
+                desc = (f"Ban vote for {target.mention}.\n"
+                        f"**Reason:** {reason}\n**Rules:** {rule_txt}\n**Term if passed:** {term} days\n\n"
+                        f"On pass, the owner chooses **Blacklist** (network-wide), **Local ban**, or **Veto**.")
+                vote = await self._create_vote(
+                    interaction, kind="ban", title=f"Ban: {target.display_name}",
+                    description=desc, target=target, voting_period=PROMO_VOTE_PERIOD)
+                vote["reason"] = reason
+                vote["violated_rules"] = rules or ""
+                vote["term_days"] = int(term)
+                store.save_data()
+                await interaction.followup.send(
+                    f"✅ Started a ban vote for {target.mention}: <#{vote['thread_id']}>", ephemeral=True)
+
+            @vote_group.command(name="ban", description="Start a council ban vote")
+            @app_commands.describe(target="User to ban", reason="Reason for the ban",
+                                   rules="Comma-separated rule IDs (e.g. 1,4)", term="Ban length if it passes")
+            @app_commands.choices(term=[
+                app_commands.Choice(name="90 days", value=90),
+                app_commands.Choice(name="180 days", value=180),
+                app_commands.Choice(name="365 days", value=365),
+                app_commands.Choice(name="720 days", value=720),
+                app_commands.Choice(name="1825 days", value=1825),
+            ])
+            async def vote_ban(interaction: discord.Interaction, target: discord.Member,
+                               reason: str, rules: str = None, term: int = 365):
+                await _start_ban(interaction, target, reason, rules, term)
 
         admin_group = self.admin_group
         admin_vote = self.admin_vote_subgroup

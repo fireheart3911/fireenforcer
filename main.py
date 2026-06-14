@@ -19,12 +19,13 @@ from cogs.tickets import (
 )
 from cogs.status import StatusView, setup_status_message, setup as setup_status
 from cogs.elo import EloSessionView, setup as setup_elo
-from cogs.council import CommentView, VoteView, VetoView, QuashView, setup as setup_council
+from cogs.council import CommentView, VoteView, VetoView, QuashView, BanVetoView, setup as setup_council
 from cogs.signup import (
     SignupView, ApplicationView, post_signup_panel, post_roster_panel,
     setup as setup_signup,
 )
 from cogs.events import EventView, setup as setup_events
+from cogs.moderation import setup as setup_moderation
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +55,8 @@ class BotClient(commands.Bot):
             self.add_view(VoteView())
             self.add_view(VetoView())
             self.add_view(QuashView())
+            if enabled("moderation"):
+                self.add_view(BanVetoView())
         if enabled("signup"):
             self.add_view(SignupView())
             self.add_view(ApplicationView())
@@ -62,7 +65,7 @@ class BotClient(commands.Bot):
 
         # --- load cogs ---
         self._status_cog = self._elo_cog = self._council_cog = self._signup_cog = None
-        self._events_cog = None
+        self._events_cog = self._mod_cog = None
 
         if enabled("tickets"):
             await setup_tickets(self)
@@ -83,6 +86,8 @@ class BotClient(commands.Bot):
             self._signup_cog = await setup_signup(self)
         if enabled("events"):
             self._events_cog = await setup_events(self)
+        if enabled("moderation"):
+            self._mod_cog = await setup_moderation(self)
 
         # --- sync slash commands once (here, not in on_ready) ---
         for guild_obj in config.GUILD_LIST:
@@ -114,6 +119,8 @@ class BotClient(commands.Bot):
             loops.append(self._signup_cog.schedule_tick)
         if self._events_cog:
             loops.append(self._events_cog.events_tick)
+        if self._mod_cog:
+            loops.append(self._mod_cog.reconcile)
         if config.module_enabled("tickets"):
             loops.append(self.autoclose_tickets)
         for loop in loops:

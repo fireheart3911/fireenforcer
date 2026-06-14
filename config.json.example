@@ -1,0 +1,40 @@
+{
+  "modules": ["tickets", "status", "elo", "council", "signup", "events", "moderation"],
+  "prefix": "sudo",
+
+  "presence": {
+    "mode": "fixed",
+    "text": "🛡️ Auxaris"
+  },
+
+  "ticket_categories": [
+    {
+      "key": "support",
+      "label": "Support",
+      "emoji": "🛂",
+      "style": "success",
+      "role_env": "SUPPORT_ROLE_ID",
+      "description": "General help and everyday questions: how things work, role or event requests, or reporting a minor issue."
+    },
+    {
+      "key": "report",
+      "label": "Report",
+      "emoji": "🚨",
+      "style": "danger",
+      "role_env": "SUPPORT_ROLE_ID",
+      "description": "Report a member or a rule violation to the staff team privately."
+    }
+  ],
+
+  "moderation": {
+    "network_name": "Auxaris",
+    "appeal_link": "https://discord.gg/your-appeals-server",
+    "rules": [
+      { "id": 1,  "title": "Be respectful",    "text": "Treat every member with courtesy. No harassment, hate speech, or personal attacks." },
+      { "id": 2,  "title": "No spam",           "text": "Don't flood channels, mass-mention, or post repetitive content." },
+      { "id": 3,  "title": "Fair play",         "text": "No cheating, exploiting, or unsporting behaviour in events or tournaments." },
+      { "id": 4,  "title": "Abuse of systems",  "text": "Don't exploit the bots, events, signups, or any server tooling." },
+      { "id": 11, "title": "Ban evasion",       "text": "Returning on an alt account to dodge a ban or blacklist is not allowed." }
+    ]
+  }
+}
