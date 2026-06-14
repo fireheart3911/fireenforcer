@@ -223,6 +223,32 @@ class BotClient(commands.Bot):
 client = BotClient(command_prefix=config.PREFIX, intents=intents)
 
 
+@client.tree.error
+async def on_app_command_error(interaction: discord.Interaction,
+                               error: discord.app_commands.AppCommandError):
+    """Turn routine check failures into clean ephemeral replies (no traceback
+    spam); still log genuinely unexpected errors."""
+    if isinstance(error, discord.app_commands.MissingPermissions):
+        msg = "❌ You don't have permission to use this command."
+    elif isinstance(error, discord.app_commands.CheckFailure):
+        msg = "❌ You can't use this command here."
+    elif isinstance(error, discord.app_commands.CommandOnCooldown):
+        msg = f"⏳ Slow down — try again in {error.retry_after:.0f}s."
+    else:
+        import traceback
+        print(f"App command error in '{getattr(interaction.command, 'name', '?')}': "
+              f"{type(error).__name__}: {error}")
+        traceback.print_exception(type(error), error, error.__traceback__)
+        msg = "⚠️ Something went wrong running that command."
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except discord.HTTPException:
+        pass
+
+
 @client.tree.command(name="ping", description="Check bot latency", guild=config.GUILD_LIST[0])
 async def ping(interaction: discord.Interaction):
     await interaction.response.send_message(f"{client.latency * 1000:.2f} ms", ephemeral=True)

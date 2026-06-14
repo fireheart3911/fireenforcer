@@ -890,7 +890,8 @@ class EventsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.group = app_commands.Group(name="event", description="Event management",
-                                        guild_ids=[config.GUILD_ID])
+                                        guild_ids=[config.GUILD_ID],
+                                        default_permissions=discord.Permissions(create_events=True))
         self.poll_group = app_commands.Group(name="poll", description="Date-poll controls",
                                              parent=self.group)
         self.brainlag_group = app_commands.Group(name="brainlag", description="Brainlag tools",
@@ -958,7 +959,7 @@ class EventsCog(commands.Cog):
 
     def _register(self):
         group, poll, brainlag = self.group, self.poll_group, self.brainlag_group
-        admin = app_commands.checks.has_permissions(manage_guild=True)
+        admin = app_commands.checks.has_permissions(create_events=True)
         ac = app_commands.autocomplete(event=self._ev_autocomplete)
         describe = app_commands.describe(event="Which event")
 
