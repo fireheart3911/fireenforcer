@@ -435,14 +435,34 @@ async def update_event_panel(client, ev):
     channel = client.get_channel(int(ev["channel_id"]))
     if not channel:
         return
-    # Terminal events keep the card (final state) but drop the action rows.
     try:
         msg = await channel.fetch_message(int(ev["panel_message_id"]))
-        await msg.edit(view=EventView(ev))
     except discord.NotFound:
         ev["panel_message_id"] = None
         ev["channel_id"] = None
         store.save_data()
+        return
+    except discord.HTTPException:
+        return
+    # Terminal events keep the card (final state) but drop the action rows.
+    try:
+        await msg.edit(view=EventView(ev))
+    except discord.HTTPException as e:
+        # A panel created before the Components V2 migration is still an embed
+        # message; Discord won't let a V2 view be edited onto it (error 50035).
+        # Repost it fresh and track the new message (self-heals after one cycle).
+        if getattr(e, "code", None) != 50035:
+            return
+        try:
+            await msg.delete()
+        except discord.HTTPException:
+            pass
+        try:
+            new = await channel.send(view=EventView(ev))
+            ev["panel_message_id"] = str(new.id)
+            store.save_data()
+        except discord.HTTPException:
+            pass
 
 
 # ---------------------------------------------------------------------------
