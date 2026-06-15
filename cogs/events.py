@@ -198,9 +198,9 @@ def _datepoll_text(ev) -> str:
 
 
 def _datepoll_full_text(ev) -> str:
-    """Every candidate date with its vote count and voters (for the button view)."""
-    lines = [f"**{ev['name']} — full date poll**"]
-    for o in sorted(ev.get("date_options", []), key=lambda o: o["at"]):
+    """Every candidate date with its vote count and voters, ranked by votes."""
+    lines = [f"**{ev['name']} — full date poll** (most votes first)"]
+    for o in _ranked_dates(ev):
         voters = [p["username"] for p in ev["participants"].values() if o["key"] in p.get("dates", [])]
         lines.append(f"\n<t:{int(o['at'])}:F> — **{len(voters)}** vote(s)")
         if voters:
@@ -263,17 +263,15 @@ class EventView(discord.ui.LayoutView):
         """Superset of custom_ids so one persistent registration routes every event."""
         c = discord.ui.Container()
         c.add_item(discord.ui.TextDisplay("Event"))
-        sel = discord.ui.Select(custom_id="event:datevote", min_values=0, max_values=1,
-                                options=[discord.SelectOption(label="—", value="—")])
-        sel.callback = self._on_datevote
-        c.add_item(discord.ui.ActionRow(sel))
         join = discord.ui.Button(label="Join", custom_id="event:rsvp")
         join.callback = self._on_join
+        vote = discord.ui.Button(label="Vote", custom_id="event:datevote")
+        vote.callback = self._on_datevote
         leave = discord.ui.Button(label="Leave", custom_id="event:leave")
         leave.callback = self._on_leave
         viewd = discord.ui.Button(label="View all dates", custom_id="event:viewdates")
         viewd.callback = self._on_viewdates
-        c.add_item(discord.ui.ActionRow(join, leave, viewd))
+        c.add_item(discord.ui.ActionRow(join, vote, leave, viewd))
         return c
 
     def _action_rows(self, ev) -> list:
@@ -281,21 +279,14 @@ class EventView(discord.ui.LayoutView):
             return []
         joinable = _is_joinable(ev)
         if ev.get("mode") == "datepoll":
-            opts = []
-            for o in sorted(ev.get("date_options", []), key=lambda o: o["at"]):
-                dt = datetime.datetime.fromtimestamp(o["at"])
-                opts.append(discord.SelectOption(label=dt.strftime("%a %d %b %Y %H:%M")[:100], value=o["key"]))
-            if not opts:
-                opts = [discord.SelectOption(label="—", value="—")]
-            sel = discord.ui.Select(placeholder="Pick the date(s) you can attend…",
-                                    custom_id="event:datevote", min_values=0, max_values=len(opts),
-                                    options=opts, disabled=not joinable)
-            sel.callback = self._on_datevote
+            vote = discord.ui.Button(label="Vote / change dates", style=discord.ButtonStyle.green,
+                                     emoji="🗳️", custom_id="event:datevote", disabled=not joinable)
+            vote.callback = self._on_datevote
             viewd = discord.ui.Button(label="View all dates", emoji="📋", custom_id="event:viewdates")
             viewd.callback = self._on_viewdates
             leave = discord.ui.Button(label="Leave", style=discord.ButtonStyle.gray, custom_id="event:leave")
             leave.callback = self._on_leave
-            return [discord.ui.ActionRow(sel), discord.ui.ActionRow(viewd, leave)]
+            return [discord.ui.ActionRow(vote, viewd, leave)]
 
         full = _is_full(ev)
         join = discord.ui.Button(label="Join", style=discord.ButtonStyle.green, emoji="✍️",
@@ -328,20 +319,17 @@ class EventView(discord.ui.LayoutView):
             return await interaction.response.send_message("❌ This event no longer exists.", ephemeral=True)
         if not _is_joinable(ev):
             return await interaction.response.send_message("❌ This poll is closed.", ephemeral=True)
-        picked = [v for v in (interaction.data.get("values") or []) if v != "—"]
         uid = str(interaction.user.id)
         if uid not in ev["participants"]:
             allowed, why = moderation.gate_check(uid)
             if not allowed:
                 return await interaction.response.send_message(f"❌ {why}", ephemeral=True)
-            # Need a username before we can record a vote.
-            return await interaction.response.send_modal(RSVPModal(ev["id"], mode="datepoll", dates=picked))
-        ev["participants"][uid]["dates"] = picked
-        store.save_data()
-        await update_event_panel(interaction.client, ev)
+            # New voter — collect a username first, then show the date picker.
+            return await interaction.response.send_modal(RSVPModal(ev["id"], mode="datepoll"))
+        # Existing participant — personal, pre-filled picker (change votes without leaving).
         await interaction.response.send_message(
-            f"✅ Recorded your vote for **{len(picked)}** date(s)." if picked
-            else "✅ Cleared your date votes.", ephemeral=True)
+            content="Pick the date(s) you can attend — your current picks are pre-selected:",
+            view=DateVoteView(ev["id"], uid), ephemeral=True)
 
     async def _on_leave(self, interaction: discord.Interaction):
         ev = _event_by_message(interaction.message.id)
@@ -384,11 +372,10 @@ def _event_by_message(message_id):
 # ---------------------------------------------------------------------------
 
 class RSVPModal(discord.ui.Modal, title="Join Event"):
-    def __init__(self, event_id: str, mode: str = "rsvp", dates: list | None = None):
+    def __init__(self, event_id: str, mode: str = "rsvp"):
         super().__init__()
         self.event_id = event_id
         self.mode = mode
-        self.dates = dates or []
         self.username_input = discord.ui.TextInput(
             label="Username", style=discord.TextStyle.short,
             placeholder="Enter your in-game username…", required=True, max_length=32)
@@ -407,15 +394,54 @@ class RSVPModal(discord.ui.Modal, title="Join Event"):
             return await interaction.response.send_message("❌ This event is full.", ephemeral=True)
         ev["participants"][uid] = {
             "username": username, "joined_at": datetime.datetime.now().timestamp(),
-            "status": "active", "source": "rsvp", "dates": self.dates,
+            "status": "active", "source": "rsvp", "dates": [],
         }
         store.save_data()
         await update_event_panel(interaction.client, ev)
         if self.mode == "datepoll":
-            msg = f"✅ Registered as **{username}** and voted for **{len(self.dates)}** date(s)."
-        else:
-            msg = f"✅ You've joined **{ev['name']}** as **{username}**!"
-        await interaction.response.send_message(msg, ephemeral=True)
+            return await interaction.response.send_message(
+                content=f"✅ Registered as **{username}** — now pick the date(s) you can attend:",
+                view=DateVoteView(ev["id"], uid), ephemeral=True)
+        await interaction.response.send_message(
+            f"✅ You've joined **{ev['name']}** as **{username}**!", ephemeral=True)
+
+
+class DateVoteView(discord.ui.View):
+    """Ephemeral, per-user date picker pre-filled with the caller's current votes —
+    so a participant can change their date votes without leaving the event."""
+
+    def __init__(self, event_id: str, user_id: str):
+        super().__init__(timeout=180)
+        self.event_id = event_id
+        self.user_id = str(user_id)
+        ev = _event(event_id) or {}
+        current = set(ev.get("participants", {}).get(self.user_id, {}).get("dates", []))
+        opts = []
+        for o in sorted(ev.get("date_options", []), key=lambda o: o["at"]):
+            dt = datetime.datetime.fromtimestamp(o["at"])
+            opts.append(discord.SelectOption(label=dt.strftime("%a %d %b %Y %H:%M")[:100],
+                                             value=o["key"], default=o["key"] in current))
+        if not opts:
+            opts = [discord.SelectOption(label="—", value="—")]
+        sel = discord.ui.Select(placeholder="Select every date you can attend…",
+                                min_values=0, max_values=len(opts), options=opts)
+        sel.callback = self._on_pick
+        self.add_item(sel)
+
+    async def _on_pick(self, interaction: discord.Interaction):
+        ev = _event(self.event_id)
+        if not ev or not _is_joinable(ev):
+            return await interaction.response.edit_message(content="❌ This poll is closed.", view=None)
+        if self.user_id not in ev["participants"]:
+            return await interaction.response.edit_message(content="❌ You're not in this event.", view=None)
+        picked = [v for v in interaction.data.get("values", []) if v != "—"]
+        ev["participants"][self.user_id]["dates"] = picked
+        store.save_data()
+        await update_event_panel(interaction.client, ev)
+        chosen = "\n".join(f"• <t:{int(o['at'])}:F>"
+                           for o in sorted(ev["date_options"], key=lambda o: o["at"]) if o["key"] in picked)
+        await interaction.response.edit_message(
+            content=f"✅ Your date votes updated — **{len(picked)}** date(s):\n{chosen or '—'}", view=None)
 
 
 # ---------------------------------------------------------------------------
@@ -849,10 +875,14 @@ class PollCloseView(discord.ui.View):
                 note += f"\n{len(others)} non-attendee(s) {'removed' if self.kick else 'marked unavailable'}."
             await channel.send(note)
 
-        # Optional DM to confirmed participants.
+        # Optional DM to confirmed participants — plus the host, always.
         sent = 0
         if self.notify:
-            for uid in winners:
+            recipients = list(winners)
+            host = ev.get("host_id")
+            if host and host not in recipients:
+                recipients.append(host)
+            for uid in recipients:
                 if await _dm(self.bot, uid, f"{ev['name']} — date confirmed 📅",
                              f"The date for **{ev['name']}** is set: <t:{int(winner['at'])}:F> "
                              f"(<t:{int(winner['at'])}:R>). See you there!", discord.Color.green()):
