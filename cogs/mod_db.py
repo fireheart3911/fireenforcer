@@ -80,7 +80,7 @@ async def init_pool() -> bool:
         host=config.MOD_DB_HOST, port=config.MOD_DB_PORT or 3306,
         user=config.MOD_DB_USER, password=config.MOD_DB_PASSWORD or "",
         db=config.MOD_DB_NAME, autocommit=True, minsize=1, maxsize=5,
-        pool_recycle=300,
+        pool_recycle=300, connect_timeout=10,
     )
     await _ensure_schema()
     return True

@@ -12,6 +12,7 @@ mod_db imports aiomysql lazily, so `from cogs import moderation` never hard-requ
 the dependency.
 """
 
+import asyncio
 import datetime
 import re
 import time
@@ -534,12 +535,20 @@ def _record_text(user_id) -> str:
 async def setup(bot: commands.Bot):
     cog = ModerationCog(bot)
     await bot.add_cog(cog)
+    # Bound DB setup hard so an unreachable/slow database can never hang startup
+    # (this runs inside setup_hook, before the bot finishes logging in).
     try:
-        if await mod_db.init_pool():
-            await cog._sync_mirror()
+        ready = await asyncio.wait_for(mod_db.init_pool(), timeout=15)
+        if ready:
+            await asyncio.wait_for(cog._sync_mirror(), timeout=15)
             print("[moderation] connected to shared DB and synced mirror.")
         else:
             print("[moderation] DB not configured — running in local-mirror/degraded mode.")
     except Exception as e:
-        print(f"[moderation] DB init failed ({type(e).__name__}: {e}) — degraded mode.")
+        kind = "timed out" if isinstance(e, asyncio.TimeoutError) else f"{type(e).__name__}: {e}"
+        print(f"[moderation] DB init/sync {kind} — degraded mode (moderation features inert).")
+        try:
+            await mod_db.close_pool()
+        except Exception:
+            pass
     return cog
