@@ -43,6 +43,10 @@ class BotClient(commands.Bot):
     async def setup_hook(self) -> None:
         enabled = config.module_enabled
 
+        # Load persisted data BEFORE any cog setup runs — cogs (e.g. moderation)
+        # may persist during setup, and writing before this would clobber data.json.
+        store.load_data()
+
         # --- persistent views (only for enabled modules) ---
         if enabled("tickets"):
             self.add_view(TicketView())
@@ -101,8 +105,6 @@ class BotClient(commands.Bot):
         print(f"Logged in as {self.user}  |  modules: {', '.join(config.MODULES)}")
 
         await self._apply_presence()
-
-        store.load_data()
 
         if config.module_enabled("status"):
             await setup_status_message(self, config.STATUS_CHANNEL_ID.id)

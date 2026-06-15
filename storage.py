@@ -2,13 +2,17 @@ import json
 
 storage: dict = {}
 count: int = -22767
+# Guards against persisting before the on-disk data has been read in. Writing
+# the empty startup dict before load_data() would clobber data.json.
+_loaded: bool = False
 
 
 def load_data():
-    global storage, count
+    global storage, count, _loaded
     try:
         with open("data.json", "r", encoding="utf-8") as f:
             storage = json.load(f)
+            _loaded = True
             count = storage.get("id_count", count)
 
             # Ensure all top-level keys exist
@@ -41,10 +45,20 @@ def load_data():
             "vacations": {},
             "user_prefs": {},
         }
+        _loaded = True
         print("No existing data found, starting fresh.")
+    except json.JSONDecodeError as e:
+        # Corrupt file — do NOT reset to empty (that would let a later save wipe
+        # a potentially recoverable file). Stay unloaded so save_data() refuses.
+        print(f"\033[91m[Storage] data.json is corrupt ({e}); NOT loading and "
+              f"refusing to overwrite it. Fix or restore the file.\033[0m")
 
 
 def save_data():
+    if not _loaded:
+        print("\033[91m[Storage] save_data() called before load_data() succeeded; "
+              "refusing to write to avoid clobbering data.json.\033[0m")
+        return
     storage["id_count"] = count
     with open("data.json", "w", encoding="utf-8") as f:
         json.dump(storage, f, indent=4, ensure_ascii=False)
