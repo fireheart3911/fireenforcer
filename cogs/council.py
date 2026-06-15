@@ -909,7 +909,7 @@ async def _quash_promotion(client: commands.Bot, guild: discord.Guild, vote: dic
 def _label_for_role(guild: discord.Guild, role) -> str:
     if not role:
         return ""
-    mapping = {config.GUEST_ROLE_ID: "Guest", config.MEMBER_ROLE_ID: "Member", config.VIP_ROLE_ID: "VIP"}
+    mapping = {config.GUEST_ROLE_ID: "Gast", config.MEMBER_ROLE_ID: "Member", config.VIP_ROLE_ID: "VIP"}
     return mapping.get(role.id, role.name)
 
 
@@ -972,14 +972,21 @@ class CouncilCog(commands.Cog):
         if not is_council(interaction.user):
             return await interaction.response.send_message("❌ Only council/owners can verify users.", ephemeral=True)
 
+        # Linked alts can't be verified directly — verify the primary account.
+        primary = primary_of(str(user.id))
+        if primary != str(user.id):
+            return await interaction.response.send_message(
+                f"❌ {user.mention} is a linked alt of <@{primary}>. "
+                f"Alts can't be verified directly — verify the primary account instead.", ephemeral=True)
+
         guest_role = interaction.guild.get_role(config.GUEST_ROLE_ID)
         if not guest_role:
             return await interaction.response.send_message("❌ Guest role not found.", ephemeral=True)
 
         try:
             await user.add_roles(guest_role, reason=f"Verified by {interaction.user}")
-            new_nick = apply_nick_prefix(user.nick or user.name, "Guest")
-            await user.edit(nick=new_nick, reason="Verified — Guest prefix")
+            new_nick = apply_nick_prefix(user.name, "Gast")
+            await user.edit(nick=new_nick, reason="Verified — Gast prefix")
         except discord.Forbidden:
             return await interaction.response.send_message(
                 "❌ I lack permission to assign the role / change the nickname.", ephemeral=True)
@@ -992,7 +999,7 @@ class CouncilCog(commands.Cog):
             info = moderation.get_moderation_info(user.id)
             if not info.startswith("✅"):
                 note = f"\n⚠️ Note — this user has a moderation record:\n{info}"
-        await interaction.response.send_message(f"✅ Verified {user.mention} as Guest.{note}", ephemeral=True)
+        await interaction.response.send_message(f"✅ Verified {user.mention} as Gast.{note}", ephemeral=True)
 
     def _register_commands(self):
         vote_group = self.vote_subgroup
