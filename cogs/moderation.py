@@ -14,6 +14,7 @@ the dependency.
 
 import asyncio
 import datetime
+import json
 import re
 import time
 
@@ -36,13 +37,40 @@ HEAT_DECAY_PER_HOUR = 1.0
 # Local mirror + alt clustering
 # ---------------------------------------------------------------------------
 
+# The moderation mirror/heat live in their OWN file, never data.json — so a
+# moderation write can never touch the bot's primary storage. It's just a cache
+# of the shared DB (bans/flags rebuild from the DB on sync; only heat is local),
+# so losing it is harmless.
+_CACHE_FILE = "moderation_cache.json"
+_cache = None
+
+
+def _load_cache():
+    global _cache
+    try:
+        with open(_CACHE_FILE, "r", encoding="utf-8") as f:
+            _cache = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        _cache = {}
+
+
+def _save_cache():
+    try:
+        with open(_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(_cache, f, indent=2, ensure_ascii=False)
+    except OSError as e:
+        print(f"[moderation] failed to write {_CACHE_FILE}: {e}")
+
+
 def _mod() -> dict:
-    m = store.storage.setdefault("moderation", {})
-    m.setdefault("bans", {})
-    m.setdefault("flags", {})
-    m.setdefault("heat", {})
-    m.setdefault("synced_at", 0)
-    return m
+    global _cache
+    if _cache is None:
+        _load_cache()
+    _cache.setdefault("bans", {})
+    _cache.setdefault("flags", {})
+    _cache.setdefault("heat", {})
+    _cache.setdefault("synced_at", 0)
+    return _cache
 
 
 def _cluster(user_id) -> set:
@@ -288,7 +316,7 @@ async def sync_mirror(client):
         })
     m["flags"] = fmap
     m["synced_at"] = int(time.time())
-    store.save_data()
+    _save_cache()
 
 
 async def enforce_guild(client, guild):
@@ -495,7 +523,7 @@ class ModerationCog(commands.Cog):
                 decayed = max(0.0, h["heat"] - (now - h["updated_at"]) / 3600.0 * HEAT_DECAY_PER_HOUR)
                 new_heat = decayed + 1
                 m["heat"][str(user.id)] = {"heat": new_heat, "updated_at": now}
-                store.save_data()
+                _save_cache()
                 level = max(1, round(new_heat))
                 secs = min(STUN_BASE * (4 ** (level - 1)), STUN_CAP)
                 until = discord.utils.utcnow() + datetime.timedelta(seconds=secs)
@@ -535,6 +563,7 @@ def _record_text(user_id) -> str:
 async def setup(bot: commands.Bot):
     cog = ModerationCog(bot)
     await bot.add_cog(cog)
+    _load_cache()  # moderation's own mirror file (never touches data.json)
     # Bound DB setup hard so an unreachable/slow database can never hang startup
     # (this runs inside setup_hook, before the bot finishes logging in).
     try:

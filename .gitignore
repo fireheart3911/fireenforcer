@@ -222,4 +222,5 @@ archive/
 requirements.txt
 config.json
 data.json
+moderation_cache.json
 status.txt
