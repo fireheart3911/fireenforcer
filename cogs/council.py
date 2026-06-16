@@ -983,13 +983,35 @@ class CouncilCog(commands.Cog):
         if not guest_role:
             return await interaction.response.send_message("❌ Guest role not found.", ephemeral=True)
 
+        # Only unranked users can be verified — not existing Guests/Members/VIPs/Council/Owners.
+        rank_role_ids = {config.GUEST_ROLE_ID, config.MEMBER_ROLE_ID, config.VIP_ROLE_ID,
+                         config.COUNCIL_ROLE_ID, config.OWNER_ROLE_ID}
+        held = next((r for r in user.roles if r.id in rank_role_ids), None)
+        if held:
+            return await interaction.response.send_message(
+                f"❌ {user.mention} already has a rank (**{held.name}**) — nothing to verify.", ephemeral=True)
+
+        # The bot must outrank the target (and they can't be the server owner) to set a nickname.
+        me = interaction.guild.me
+        if user.id == interaction.guild.owner_id or user.top_role >= me.top_role:
+            return await interaction.response.send_message(
+                f"❌ I can't manage {user.mention} — their top role is above mine (or they own the server). "
+                f"Move my role higher and retry.", ephemeral=True)
+
         try:
             await user.add_roles(guest_role, reason=f"Verified by {interaction.user}")
-            new_nick = apply_nick_prefix(user.name, "Gast")
-            await user.edit(nick=new_nick, reason="Verified — Gast prefix")
         except discord.Forbidden:
             return await interaction.response.send_message(
-                "❌ I lack permission to assign the role / change the nickname.", ephemeral=True)
+                "❌ I can't assign the Guest role — check my Manage Roles permission and that the role is below mine.",
+                ephemeral=True)
+        try:
+            await user.edit(nick=apply_nick_prefix(user.name, "Gast"), reason="Verified — Gast prefix")
+        except discord.Forbidden:
+            await council_log(self.bot,
+                              f"⚠️ Verified <@{user.id}> but couldn't set their nickname (permissions).")
+            return await interaction.response.send_message(
+                f"⚠️ Gave {user.mention} the Guest role, but couldn't set the **[Gast]** nickname "
+                f"(their role may sit above mine).", ephemeral=True)
 
         await council_log(self.bot,
                           f"✅ <@{user.id}> verified by <@{interaction.user.id}> — assigned Guest.")
