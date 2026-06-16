@@ -11,6 +11,7 @@ on instances that don't run moderation or don't have the dependency installed.
 """
 
 import time
+import warnings
 
 import config
 
@@ -117,10 +118,14 @@ _MIGRATIONS = (
 
 
 async def _ensure_schema():
-    for ddl in _DDL:
-        await _execute(ddl)
-    for mig in _MIGRATIONS:
-        await _execute(mig)
+    # CREATE/ALTER ... IF NOT EXISTS emit benign "already exists" / "duplicate column"
+    # warnings on every boot once the schema is in place — silence just this block.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for ddl in _DDL:
+            await _execute(ddl)
+        for mig in _MIGRATIONS:
+            await _execute(mig)
 
 
 # ---------------------------------------------------------------------------
