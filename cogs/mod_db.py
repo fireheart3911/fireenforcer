@@ -38,6 +38,8 @@ _DDL = (
         user_id        BIGINT       NOT NULL,
         type           VARCHAR(40),
         reason         TEXT,
+        severity       VARCHAR(10),
+        violated_rules TEXT,
         blocks         TINYINT      NOT NULL DEFAULT 0,
         moderator_id   BIGINT,
         created_at     BIGINT,
@@ -107,9 +109,18 @@ async def _execute(query, args=(), *, fetch=None):
             return cur.lastrowid
 
 
+# Additive migrations for already-created tables (no-ops on a fresh schema).
+_MIGRATIONS = (
+    "ALTER TABLE mod_flags ADD COLUMN IF NOT EXISTS severity VARCHAR(10)",
+    "ALTER TABLE mod_flags ADD COLUMN IF NOT EXISTS violated_rules TEXT",
+)
+
+
 async def _ensure_schema():
     for ddl in _DDL:
         await _execute(ddl)
+    for mig in _MIGRATIONS:
+        await _execute(mig)
 
 
 # ---------------------------------------------------------------------------
@@ -165,16 +176,16 @@ async def deactivate_expired_bans() -> int:
 # Flags
 # ---------------------------------------------------------------------------
 
-async def add_flag(user_id, type_, reason, blocks, moderator_id,
-                   expires_at, source_guild) -> int:
+async def add_flag(user_id, type_, reason, blocks, moderator_id, expires_at, source_guild,
+                   severity=None, violated_rules=None) -> int:
     return await _execute(
         """
         INSERT INTO mod_flags
-            (user_id, type, reason, blocks, moderator_id, created_at,
-             expires_at, source_guild, active)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1)
+            (user_id, type, reason, severity, violated_rules, blocks, moderator_id,
+             created_at, expires_at, source_guild, active)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1)
         """,
-        (int(user_id), type_, reason, 1 if blocks else 0,
+        (int(user_id), type_, reason, severity, violated_rules, 1 if blocks else 0,
          int(moderator_id) if moderator_id else None, _now(),
          int(expires_at) if expires_at else None, int(source_guild)))
 

@@ -32,6 +32,26 @@ STUN_BASE = 300          # 5 minutes
 STUN_CAP = 86_400        # 24 hours
 HEAT_DECAY_PER_HOUR = 1.0
 
+# Flag categories: stored value (DB) → label shown to staff.
+FLAG_CATEGORIES = {
+    "cheating":         "Cheating",
+    "fairplay":         "Fair Play Violation",
+    "toxicity":         "Toxicity / Harassment",
+    "spam":             "Spam / Advertising",
+    "ban_evasion":      "Ban Evasion",
+    "scam":             "Scam / Fraud",
+    "event_misconduct": "Event Misconduct",
+    "note":             "Note",
+    "other":            "Other",
+}
+_FLAG_CHOICES = [app_commands.Choice(name=label, value=value)
+                 for value, label in FLAG_CATEGORIES.items()]
+
+
+def _category_label(value) -> str:
+    """Pretty label for a stored category value (legacy free-text → Title Case)."""
+    return FLAG_CATEGORIES.get(value, (value or "flag").replace("_", " ").title())
+
 
 # ---------------------------------------------------------------------------
 # Local mirror + alt clustering
@@ -156,8 +176,14 @@ def get_moderation_info(user_id) -> str:
         lines.append(f"⛔ **{label}** ({exp}) — {b.get('reason') or '—'}")
     for f in flags:
         blk = " 🚫" if f.get("blocks") else ""
+        sev = f" [{f['severity']}]" if f.get("severity") else ""
         exp = "" if not f.get("expires_at") else f" · until <t:{int(f['expires_at'])}:R>"
-        lines.append(f"⚑ **{f.get('type', 'flag')}**{blk} — {f.get('reason') or '—'}{exp}")
+        desc = f.get("reason") or "—"
+        if len(desc) > 140:
+            desc = desc[:140] + "…"
+        rids = _parse_rule_ids(f.get("violated_rules"))
+        rule_txt = f" · rules {','.join(map(str, rids))}" if rids else ""
+        lines.append(f"⚑ **{_category_label(f.get('type'))}**{sev}{blk} — {desc}{rule_txt}{exp}")
     return "\n".join(lines)[:1024]
 
 
@@ -312,6 +338,7 @@ async def sync_mirror(client):
     for f in flags:
         fmap.setdefault(str(f["user_id"]), []).append({
             "id": f["id"], "type": f["type"], "reason": f["reason"],
+            "severity": f.get("severity"), "violated_rules": f.get("violated_rules"),
             "blocks": bool(f["blocks"]), "expires_at": f["expires_at"],
         })
     m["flags"] = fmap
@@ -353,6 +380,47 @@ async def enforce_guild(client, guild):
 async def sync_and_enforce(client):
     await sync_mirror(client)
     await enforce_guild(client, client.get_guild(config.GUILD_ID))
+
+
+# ---------------------------------------------------------------------------
+# Flag form
+# ---------------------------------------------------------------------------
+
+class FlagModal(discord.ui.Modal, title="Flag a user"):
+    def __init__(self, target, category, severity, blocks, expires_at):
+        super().__init__()
+        self.target = target
+        self.category = category
+        self.severity = severity
+        self.blocks = blocks
+        self.expires_at = expires_at
+        self.desc_input = discord.ui.TextInput(
+            label="Description — what happened", style=discord.TextStyle.paragraph,
+            required=True, max_length=1500)
+        self.rules_input = discord.ui.TextInput(
+            label="Violated rule IDs (e.g. 1,4) — optional", required=False, max_length=60)
+        self.add_item(self.desc_input)
+        self.add_item(self.rules_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not mod_db.is_ready():
+            return await interaction.response.send_message(
+                "❌ The moderation database isn't available.", ephemeral=True)
+        label = _category_label(self.category)
+        desc = self.desc_input.value.strip()
+        rules = self.rules_input.value.strip()
+        fid = await mod_db.add_flag(
+            self.target.id, self.category, desc, self.blocks, interaction.user.id,
+            self.expires_at, interaction.guild.id, severity=self.severity, violated_rules=rules)
+        await sync_mirror(interaction.client)
+        rule_txt = ", ".join(f"Rule {r}" for r in _parse_rule_ids(rules)) or "—"
+        await _log(interaction.client,
+                   f"⚑ <@{self.target.id}> flagged **{label}** [{self.severity}]"
+                   f"{' (blocking)' if self.blocks else ''} by <@{interaction.user.id}> "
+                   f"(`#{fid}`) · rules {rule_txt}\n{desc[:500]}")
+        await interaction.response.send_message(
+            f"⚑ Flagged {self.target.mention} — **{label}** [{self.severity}]"
+            f"{' (blocks participation)' if self.blocks else ''}. Flag `#{fid}`.", ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
@@ -445,12 +513,16 @@ class ModerationCog(commands.Cog):
             await self._log(f"✅ <@{user.id}> un-blacklisted by <@{interaction.user.id}>.")
             await interaction.followup.send(f"✅ Removed {user.mention} from the blacklist.", ephemeral=True)
 
-        @group.command(name="flag", description="Add a fairplay flag to a user (optionally blocks participation)")
-        @app_commands.describe(user="User", type="Flag type, e.g. fairplay / cheating / note",
-                               reason="Why", blocks="Block them from events/signups?",
-                               duration="Expiry, e.g. 30d (blank = until removed)")
-        async def mod_flag(interaction: discord.Interaction, user: discord.User, type: str,
-                           reason: str = None, blocks: bool = False, duration: str = None):
+        @group.command(name="flag", description="Flag a user — opens a form for the offence details")
+        @app_commands.describe(user="User to flag", category="What kind of offence",
+                               severity="How serious", blocks="Block them from events/signups?",
+                               duration="Auto-expire, e.g. 30d (blank = until removed)")
+        @app_commands.choices(category=_FLAG_CHOICES, severity=[
+            app_commands.Choice(name="Low", value="low"),
+            app_commands.Choice(name="Medium", value="medium"),
+            app_commands.Choice(name="High", value="high")])
+        async def mod_flag(interaction: discord.Interaction, user: discord.User, category: str,
+                           severity: str = "medium", blocks: bool = False, duration: str = None):
             if not mod_db.is_ready():
                 return await interaction.response.send_message(
                     "❌ The moderation database isn't configured on this instance.", ephemeral=True)
@@ -460,15 +532,7 @@ class ModerationCog(commands.Cog):
                     expires_at = time.time() + parse_duration_seconds(duration)
                 except ValueError as e:
                     return await interaction.response.send_message(f"❌ {e}", ephemeral=True)
-            await interaction.response.defer(ephemeral=True)
-            fid = await mod_db.add_flag(user.id, type.strip()[:40], reason or "", blocks,
-                                        interaction.user.id, expires_at, interaction.guild.id)
-            await self._sync_mirror()
-            await self._log(f"⚑ <@{user.id}> flagged **{type}**{' (blocking)' if blocks else ''} "
-                            f"by <@{interaction.user.id}> — {reason or '—'} (#{fid})")
-            await interaction.followup.send(
-                f"⚑ Flagged {user.mention} as **{type}**{' (blocks participation)' if blocks else ''}. "
-                f"Flag id `#{fid}`.", ephemeral=True)
+            await interaction.response.send_modal(FlagModal(user, category, severity, blocks, expires_at))
 
         @group.command(name="unflag", description="Remove a flag by its id")
         @app_commands.describe(flag_id="The flag id from /mod record")
@@ -554,9 +618,14 @@ def _record_text(user_id) -> str:
         lines.append(f"⛔ **{label}** (<@{c}>) — {exp} — {b.get('reason') or '—'}")
     for c, f in flags:
         blk = " 🚫" if f.get("blocks") else ""
-        exp = "" if not f.get("expires_at") else f" · until <t:{int(f['expires_at'])}:R>"
-        lines.append(f"⚑ `#{f['id']}` **{f.get('type', 'flag')}**{blk} (<@{c}>) — "
-                     f"{f.get('reason') or '—'}{exp}")
+        sev = f" [{f['severity']}]" if f.get("severity") else ""
+        exp = "" if not f.get("expires_at") else f" · expires <t:{int(f['expires_at'])}:R>"
+        line = (f"⚑ `#{f['id']}` **{_category_label(f.get('type'))}**{sev}{blk} (<@{c}>){exp}\n"
+                f"　{f.get('reason') or '—'}")
+        rfields = _rule_fields(f.get("violated_rules"))
+        if rfields:
+            line += "\n　Rules: " + "; ".join(name for name, _ in rfields)
+        lines.append(line)
     return "\n".join(lines)[:4000]
 
 
