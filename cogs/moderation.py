@@ -346,15 +346,31 @@ async def sync_mirror(client):
     _save_cache()
 
 
+def _ban_audit_reason(scope, expires_at, reason, synced=False) -> str:
+    """Build the Discord audit-log reason (Discord has no real ban duration, so the
+    term is conveyed here)."""
+    base = "Network Blacklist" if scope == "global" else ("Local ban" if scope == "local" else "Ban")
+    if synced:
+        base += " (synced)"
+    when = (f"until {datetime.datetime.fromtimestamp(int(expires_at)).strftime('%Y-%m-%d %H:%M')}"
+            if expires_at else "permanent")
+    parts = [base, when]
+    if reason:
+        parts.append(reason)
+    return " · ".join(parts)[:480]
+
+
 async def enforce_guild(client, guild):
     """Reconcile this guild's Discord bans against the (already-synced) mirror."""
     if not guild or not mod_db.is_ready():
         return
     bans = _mod()["bans"]
-    desired = set()
+    desired_info = {}   # int uid -> the ban record that put them here (for the reason)
     for uid_s, b in bans.items():
         if b.get("scope") == "global" or int(b.get("source_guild") or 0) == guild.id:
-            desired |= {int(c) for c in _cluster(uid_s)}
+            for c in _cluster(uid_s):
+                desired_info.setdefault(int(c), b)
+    desired = set(desired_info)
     applied = await mod_db.applied_for_guild(guild.id)
 
     for uid in desired - applied:
@@ -362,8 +378,11 @@ async def enforce_guild(client, guild):
         if member and _is_protected(member):
             await _log(client, f"⚠️ Skipped auto-ban of protected member <@{uid}>.")
             continue
+        b = desired_info[uid]
         try:
-            await guild.ban(discord.Object(id=uid), reason="GlobalBan (moderation sync)")
+            await guild.ban(discord.Object(id=uid),
+                            reason=_ban_audit_reason(b.get("scope"), b.get("expires_at"),
+                                                     b.get("reason"), synced=True))
             await mod_db.record_applied_ban(uid, guild.id)
         except discord.Forbidden:
             await _log(client, f"⚠️ Missing permission to ban <@{uid}>.")
@@ -371,7 +390,7 @@ async def enforce_guild(client, guild):
             pass
     for uid in applied - desired:
         try:
-            await guild.unban(discord.Object(id=uid), reason="GlobalBan lifted (moderation sync)")
+            await guild.unban(discord.Object(id=uid), reason="Network Blacklist lifted (synced)")
         except (discord.NotFound, discord.HTTPException):
             pass
         await mod_db.remove_applied_ban(uid, guild.id)
@@ -488,7 +507,8 @@ class ModerationCog(commands.Cog):
             # Immediate, delete-aware ban of the primary target; cluster + sync handle the rest.
             try:
                 await interaction.guild.ban(
-                    discord.Object(id=user.id), reason=f"GlobalBan: {reason}",
+                    discord.Object(id=user.id),
+                    reason=_ban_audit_reason("global", expires_at, reason),
                     delete_message_seconds=max(0, min(int(delete_days), 7)) * 86400)
                 await mod_db.record_applied_ban(user.id, interaction.guild.id)
             except discord.Forbidden:
