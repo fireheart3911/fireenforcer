@@ -756,8 +756,13 @@ async def _apply_ban_vote(client: commands.Bot, vote: dict, scope: str, owner_id
     from cogs import moderation, mod_db  # lazy: avoids a circular import
 
     guild = client.get_guild(config.GUILD_ID)
-    term_days = int(vote.get("term_days") or 365)
-    expires_at = datetime.datetime.now().timestamp() + term_days * 86400
+    term_days = vote.get("term_days")          # None = permanent (owner-approval only)
+    owner_approved = owner_id is not None
+    # Permanent requires explicit owner approval; on the no-action timeout it falls back
+    # to a long finite local term so the privilege is never granted automatically.
+    if term_days is None and not owner_approved:
+        term_days = 1825
+    expires_at = None if term_days is None else datetime.datetime.now().timestamp() + term_days * 86400
     target_id = vote["target_id"]
     reason = vote.get("reason") or "Council ban vote"
     rules = vote.get("violated_rules") or ""
@@ -780,8 +785,9 @@ async def _apply_ban_vote(client: commands.Bot, vote: dict, scope: str, owner_id
     await moderation.send_ban_notice(client, target_id, reason, rules, expires_at, scope,
                                      guild.name if guild else "the server", approver="council")
     label = "blacklisted across the network" if scope == "global" else "banned locally"
+    term_txt = "permanently" if expires_at is None else f"for {int(term_days)}d"
     by = f" (approved by <@{owner_id}>)" if owner_id else " (default after veto window)"
-    await council_log(client, f"⛔ <@{target_id}> {label} for {term_days}d via ban vote "
+    await council_log(client, f"⛔ <@{target_id}> {label} {term_txt} via ban vote "
                               f"`{vote['id']}`{by}.")
 
 
@@ -1094,7 +1100,7 @@ class CouncilCog(commands.Cog):
         # Ban vote — only when the moderation module is also enabled (it does the banning).
         if config.module_enabled("moderation"):
             async def _start_ban(interaction: discord.Interaction, target: discord.Member,
-                                 reason: str, rules: str, term: int):
+                                 reason: str, rules: str, term: int, blacklist: bool):
                 if not is_council(interaction.user):
                     return await interaction.response.send_message("❌ Council/owners only.", ephemeral=True)
                 from cogs import moderation  # lazy
@@ -1103,33 +1109,46 @@ class CouncilCog(commands.Cog):
                         "❌ That member is protected (admin/owner/council) and can't be ban-voted.",
                         ephemeral=True)
                 await interaction.response.defer(ephemeral=True)
+                term_days = None if term == 0 else int(term)   # term 0 = permanent
                 rule_txt = ", ".join(f"Rule {r}" for r in moderation._parse_rule_ids(rules)) or "—"
+                term_label = "Permanent" if term_days is None else f"{term_days} days"
+                # Permanent term and/or network blacklist are owner-approval-only escalations.
+                privileged = [n for n, on in (("permanent term", term_days is None),
+                                              ("network blacklist", blacklist)) if on]
+                note = (f"\n⚠️ Requested **{' + '.join(privileged)}** — requires **owner approval** "
+                        f"at the veto window (otherwise it falls back to a finite local ban)." if privileged else "")
                 desc = (f"Ban vote for {target.mention}.\n"
-                        f"**Reason:** {reason}\n**Rules:** {rule_txt}\n**Term if passed:** {term} days\n\n"
+                        f"**Reason:** {reason}\n**Rules:** {rule_txt}\n"
+                        f"**Term if passed:** {term_label}\n"
+                        f"**Blacklist requested:** {'Yes' if blacklist else 'No'}{note}\n\n"
                         f"On pass, the owner chooses **Blacklist** (network-wide), **Local ban**, or **Veto**.")
                 vote = await self._create_vote(
                     interaction, kind="ban", title=f"Ban: {target.display_name}",
                     description=desc, target=target, voting_period=PROMO_VOTE_PERIOD)
                 vote["reason"] = reason
                 vote["violated_rules"] = rules or ""
-                vote["term_days"] = int(term)
+                vote["term_days"] = term_days            # None = permanent
+                vote["blacklist_requested"] = bool(blacklist)
                 store.save_data()
                 await interaction.followup.send(
                     f"✅ Started a ban vote for {target.mention}: <#{vote['thread_id']}>", ephemeral=True)
 
             @vote_group.command(name="ban", description="Start a council ban vote")
             @app_commands.describe(target="User to ban", reason="Reason for the ban",
-                                   rules="Comma-separated rule IDs (e.g. 1,4)", term="Ban length if it passes")
+                                   rules="Comma-separated rule IDs (e.g. 1,4)",
+                                   term="Ban length if it passes",
+                                   blacklist="Request a network-wide blacklist (needs owner approval)")
             @app_commands.choices(term=[
                 app_commands.Choice(name="90 days", value=90),
                 app_commands.Choice(name="180 days", value=180),
                 app_commands.Choice(name="365 days", value=365),
                 app_commands.Choice(name="720 days", value=720),
                 app_commands.Choice(name="1825 days", value=1825),
+                app_commands.Choice(name="Permanent (needs owner approval)", value=0),
             ])
             async def vote_ban(interaction: discord.Interaction, target: discord.Member,
-                               reason: str, rules: str = None, term: int = 365):
-                await _start_ban(interaction, target, reason, rules, term)
+                               reason: str, rules: str = None, term: int = 365, blacklist: bool = False):
+                await _start_ban(interaction, target, reason, rules, term, blacklist)
 
         admin_group = self.admin_group
         admin_vote = self.admin_vote_subgroup
