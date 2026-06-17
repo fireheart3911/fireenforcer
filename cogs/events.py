@@ -152,7 +152,16 @@ def _discord_event_url(event_id: str) -> str:
 
 def _brainlag_panel_fields(ev) -> list[tuple[str, str]]:
     sent = ev.get("_brainlag_links_sent")
-    return [("🧠 Brainlag", "Join links sent ✅" if sent else "Join links not sent yet")]
+    fields = [("🧠 Brainlag", "Join links sent ✅" if sent else "Join links not sent yet")]
+    if ev.get("_brainlag_results"):
+        scored = [(p["username"], p["score"]) for p in ev["participants"].values()
+                  if p.get("score") is not None]
+        if scored:
+            top = max(scored, key=lambda x: x[1])
+            fields.append(("🏁 Results", f"Posted · 🥇 {top[0]} ({top[1]})"))
+        else:
+            fields.append(("🏁 Results", "Posted"))
+    return fields
 
 
 EVENT_TYPES = {
@@ -721,6 +730,97 @@ async def _send_brainlag_links(client, ev, matched: dict) -> str:
     return "\n".join(lines)[:1900]
 
 
+def _brainlag_results_embed(ev, scores: dict) -> discord.Embed:
+    """Podium + ranked scores. `scores` is uid -> int."""
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    embed = discord.Embed(title=f"🏁 {ev['name']} — Results", color=discord.Color.gold(),
+                          timestamp=datetime.datetime.now())
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (uid, score) in enumerate(ranked):
+        p = ev["participants"].get(uid, {})
+        rank = medals[i] if i < 3 else f"**#{i + 1}**"
+        lines.append(f"{rank} {p.get('username', uid)} (<@{uid}>) — **{score}**")
+    embed.description = "\n".join(lines) if lines else "No scores recorded."
+    noscore = [p["username"] for uid, p in ev["participants"].items()
+               if p.get("status") == "active" and uid not in scores]
+    if noscore:
+        embed.add_field(name="No score recorded", value=", ".join(noscore)[:1024], inline=False)
+    return embed
+
+
+_SCORE_RE = re.compile(r"^(.+?)[\s:=\-]+(-?\d+)\s*$")
+
+
+class BrainlagResultsModal(discord.ui.Modal, title="Brainlag Results"):
+    def __init__(self, event_id: str, screenshot: discord.Attachment):
+        super().__init__()
+        self.event_id = event_id
+        self.screenshot = screenshot
+        self.scores_input = discord.ui.TextInput(
+            label="Scores — one per line: name score", style=discord.TextStyle.paragraph,
+            required=True, max_length=1500, placeholder="Alice 1200\nBob 950\nPlayer 3 700")
+        self.add_item(self.scores_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        ev = _event(self.event_id)
+        if not ev:
+            return await interaction.response.send_message("❌ Event not found.", ephemeral=True)
+
+        by_name = {p["username"].strip().lower(): uid for uid, p in ev["participants"].items()}
+        scores, unmatched, unparsed = {}, [], []
+        for raw in self.scores_input.value.splitlines():
+            line = re.sub(r"^\s*\d+[.)]\s*", "", raw.strip())   # drop a leading "1." rank
+            if not line:
+                continue
+            m = _SCORE_RE.match(line)
+            if not m:
+                unparsed.append(raw.strip())
+                continue
+            name, score = m.group(1).strip(), int(m.group(2))
+            uid = by_name.get(name.lower())
+            if uid:
+                scores[uid] = score
+                ev["participants"][uid]["score"] = score
+            else:
+                unmatched.append(name)
+        if not scores:
+            return await interaction.response.send_message(
+                "❌ Couldn't match any scores to participants. Use `name score`, one per line.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        # Re-upload the screenshot so it lives on the bot's message permanently.
+        file = None
+        try:
+            data = await self.screenshot.read()
+            ext = (self.screenshot.filename.rsplit(".", 1)[-1] if "." in self.screenshot.filename else "png").lower()
+            file = discord.File(io.BytesIO(data), filename=f"podium.{ext}")
+        except (discord.HTTPException, discord.NotFound):
+            ext = None
+
+        embed = _brainlag_results_embed(ev, scores)
+        if file:
+            embed.set_image(url=f"attachment://podium.{ext}")
+        channel = (interaction.client.get_channel(int(ev["channel_id"]))
+                   if ev.get("channel_id") else interaction.channel)
+        try:
+            await channel.send(embed=embed, file=file) if file else await channel.send(embed=embed)
+        except discord.HTTPException:
+            pass
+
+        ev["_brainlag_results"] = {"posted_at": datetime.datetime.now().timestamp()}
+        ev["status"] = "ended"
+        store.save_data()
+        await update_event_panel(interaction.client, ev)
+
+        summary = f"✅ Posted Brainlag results for **{ev['name']}** ({len(scores)} scored) and closed the event."
+        if unmatched:
+            summary += f"\n⚠️ Unmatched names: {', '.join(unmatched)}"
+        if unparsed:
+            summary += f"\n⚠️ Couldn't parse {len(unparsed)} line(s)."
+        await interaction.followup.send(summary[:1900], ephemeral=True)
+
+
 class BrainlagResolveView(discord.ui.View):
     """Host resolves unmatched links to participants. Up to 4 selects per page
     (Discord allows 5 action rows; the 5th holds the Send button)."""
@@ -1127,6 +1227,27 @@ class EventsCog(commands.Cog):
                 return await interaction.response.send_message(
                     "❌ This event has no participants yet.", ephemeral=True)
             await interaction.response.send_modal(BrainlagLinksModal(ev["id"]))
+
+        @brainlag.command(name="results",
+                          description="Post Brainlag results (scores + podium screenshot) and close the event")
+        @app_commands.describe(event="Which event", screenshot="Podium screenshot (image)")
+        @ac
+        @admin
+        async def brainlag_results(interaction: discord.Interaction, event: str,
+                                   screenshot: discord.Attachment):
+            ev = _event(event)   # allow ended events too (re-posting / corrections)
+            if not ev:
+                return await interaction.response.send_message("❌ No event with that id.", ephemeral=True)
+            if ev.get("type") != "brainlag":
+                return await interaction.response.send_message(
+                    "❌ This is only available for Brainlag events.", ephemeral=True)
+            if not _roster(ev):
+                return await interaction.response.send_message(
+                    "❌ This event has no participants.", ephemeral=True)
+            if not (screenshot.content_type or "").startswith("image/"):
+                return await interaction.response.send_message(
+                    "❌ The screenshot must be an image.", ephemeral=True)
+            await interaction.response.send_modal(BrainlagResultsModal(ev["id"], screenshot))
 
 
 async def setup(bot: commands.Bot):
